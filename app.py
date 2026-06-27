@@ -401,52 +401,117 @@ with tab_stocks:
     if stocks.empty:
         st.info("No stock screener data — run `--mode stock-screener`")
     else:
-        sc1, sc2, sc3 = st.columns(3)
-        min_composite = sc1.slider("Min composite score", 0, 100, 60)
-        min_mc        = sc2.slider("Min Minervini count", 0, 7, 3)
-        ind_choices   = ["All"] + sorted(stocks['industry_name'].dropna().unique().tolist())
-        sel_ind       = sc3.selectbox("Industry", ind_choices)
+        has_hist  = 'sctr_hist' in stocks.columns and stocks['sctr_hist'].notna().any()
+        has_sctr  = 'sctr' in stocks.columns
+        has_cr    = 'cr_score' in stocks.columns
 
+        # ── Row 1: core quality filters ───────────────────────────────────
+        r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+        min_composite = r1c1.slider("Min composite score",  0,   100, 60)
+        min_mc        = r1c2.slider("Min Minervini (0–7)",  0,   7,   3)
+        min_rs        = r1c3.slider("Min RS percentile",    0,   99,  0)
+        stage_2b_only = r1c4.checkbox("Stage 2B only (above ALL MAs)", value=False)
+
+        # ── Row 2: SCTR + CR filters ──────────────────────────────────────
+        r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+        min_sctr      = r2c1.slider("Min SCTR (current)",         0,   100, 0)  if has_sctr else 0
+        min_sctr_hist = r2c2.slider("Min SCTR (prev snapshot)",   0,   100, 0,
+                                     help="Filter by SCTR from the previous saved snapshot (~2 weeks ago)") \
+                        if has_hist else 0
+        min_cr        = r2c3.slider("Min CR leader score (0–5)",  0,   5,   0)  if has_cr  else 0
+        ind_choices   = ["All"] + sorted(stocks['industry_name'].dropna().unique().tolist())
+        sel_ind       = r2c4.selectbox("Industry", ind_choices)
+
+        # ── Apply filters ──────────────────────────────────────────────────
         sf = stocks.copy()
-        sf = sf[sf['composite'] >= min_composite]
-        sf = sf[sf['minervini_count'] >= min_mc]
+        sf = sf[sf['composite']      >= min_composite]
+        sf = sf[sf['minervini_count']>= min_mc]
+        sf = sf[sf['rs_pct'].fillna(0).astype(float) >= min_rs]
+        if stage_2b_only:
+            sf = sf[sf['stage'] == '2B']
+        if has_sctr and min_sctr > 0:
+            sf = sf[sf['sctr'].fillna(0).astype(float) >= min_sctr]
+        if has_hist and min_sctr_hist > 0:
+            sf = sf[sf['sctr_hist'].fillna(0).astype(float) >= min_sctr_hist]
+        if has_cr and min_cr > 0:
+            sf = sf[sf['cr_score'].fillna(0).astype(int) >= min_cr]
         if sel_ind != "All":
             sf = sf[sf['industry_name'] == sel_ind]
 
-        st.caption(f"{len(sf)} stocks")
+        # ── Summary metrics ────────────────────────────────────────────────
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Stocks shown", len(sf))
+        m2.metric("Industries",   sf['industry_name'].nunique() if not sf.empty else 0)
+        m3.metric("Avg SCTR",     f"{sf['sctr'].mean():.1f}"      if has_sctr and not sf.empty else "–")
+        m4.metric("Avg RS%",      f"{sf['rs_pct'].mean():.0f}"    if not sf.empty else "–")
+        m5.metric("5/5 CR",       int((sf['cr_score'] == 5).sum()) if has_cr and not sf.empty else 0)
 
-        # Scatter: RS% vs Stage score, sized by Minervini
-        if len(sf) > 3:
-            fig = px.scatter(
-                sf,
-                x='rs_pct', y='stage_score',
-                size='minervini_count',
-                color='ind_faber',
-                color_discrete_map=_FABER_COLOR,
-                hover_data=['ticker', 'industry_name', 'composite', 'cr_score'],
-                labels={'rs_pct': 'RS Percentile', 'stage_score': 'Stage Score',
-                        'ind_faber': 'Faber'},
-                title="Stock Universe — RS vs Stage Quality",
+        if sf.empty:
+            st.warning("No stocks match the current filters.")
+        else:
+            # ── Scatter: RS% vs SCTR, sized by Minervini, coloured by CR ──
+            plot_df = sf.copy()
+            plot_df['cr_label'] = plot_df['cr_score'].astype(str) + "/5" if has_cr else "–"
+            if has_sctr and 'sctr' in plot_df.columns:
+                fig = px.scatter(
+                    plot_df,
+                    x='rs_pct', y='sctr',
+                    size='minervini_count',
+                    color='cr_score' if has_cr else 'ind_faber',
+                    color_continuous_scale='RdYlGn' if has_cr else None,
+                    color_discrete_map=None if has_cr else _FABER_COLOR,
+                    hover_name='ticker',
+                    hover_data={
+                        'industry_name': True,
+                        'composite': ':.1f',
+                        'stage': True,
+                        'sctr_hist': (':.1f' if has_hist else False),
+                        'pct_from_52w_high': ':.1f',
+                    },
+                    labels={'rs_pct': 'RS Percentile (12m)',
+                            'sctr': 'SCTR (current)',
+                            'cr_score': 'CR Score'},
+                    title="RS Percentile vs SCTR  (size = Minervini count, colour = CR score)",
+                )
+                # Draw threshold reference lines
+                if min_rs > 0:
+                    fig.add_vline(x=min_rs, line_dash="dot", line_color="grey",
+                                  annotation_text=f"RS≥{min_rs}")
+                if min_sctr > 0:
+                    fig.add_hline(y=min_sctr, line_dash="dot", line_color="grey",
+                                  annotation_text=f"SCTR≥{min_sctr}")
+                fig.update_layout(height=420, margin=dict(t=40, b=10, l=0, r=0))
+                st.plotly_chart(fig, use_container_width=True)
+
+            # ── Table ──────────────────────────────────────────────────────
+            show_s = [c for c in [
+                'rank', 'ticker', 'sector_name', 'industry_name', 'ind_faber',
+                'composite', 'composite_pct',
+                'stage', 'minervini_count',
+                'rs_pct', 'sctr', 'sctr_hist', 'cr_score',
+                'pct_vs_sma200', 'pct_vs_sma150', 'sma200_slope',
+                'range_pos_52w', 'pct_from_52w_high', 'golden_cross',
+            ] if c in sf.columns]
+
+            fmt = {
+                'composite': '{:.1f}', 'pct_vs_sma200': '{:+.1f}%',
+                'pct_vs_sma150': '{:+.1f}%', 'sma200_slope': '{:+.2f}%',
+                'range_pos_52w': '{:.0f}%', 'pct_from_52w_high': '{:+.1f}%',
+                'sctr': '{:.1f}', 'sctr_hist': '{:.1f}',
+            }
+            styled_s = (
+                sf[show_s]
+                .style
+                .map(_color_stage,  subset=['stage']     if 'stage'     in show_s else [])
+                .map(_color_faber,  subset=['ind_faber'] if 'ind_faber' in show_s else [])
+                .background_gradient(subset=['composite'],  cmap='RdYlGn', vmin=0,  vmax=100)
+                .background_gradient(subset=['sctr'],       cmap='RdYlGn', vmin=0,  vmax=100)
+                .background_gradient(subset=['sctr_hist'],  cmap='RdYlGn', vmin=0,  vmax=100)
+                .background_gradient(subset=['rs_pct'],     cmap='RdYlGn', vmin=1,  vmax=99)
+                .background_gradient(subset=['cr_score'],   cmap='RdYlGn', vmin=0,  vmax=5)
+                .format(fmt, na_rep='–')
             )
-            fig.update_layout(height=380, margin=dict(t=40, b=10, l=0, r=0))
-            st.plotly_chart(fig, use_container_width=True)
-
-        show_s = [c for c in ['rank', 'ticker', 'industry_name', 'sector_name',
-                               'ind_faber', 'composite', 'composite_pct',
-                               'stage', 'minervini_count', 'rs_pct', 'cr_score',
-                               'pct_vs_sma200', 'sma200_slope', 'range_pos_52w',
-                               'pct_from_52w_high'] if c in sf.columns]
-        styled_s = (
-            sf[show_s]
-            .style
-            .map(_color_stage,  subset=['stage']     if 'stage' in show_s else [])
-            .map(_color_faber,  subset=['ind_faber'] if 'ind_faber' in show_s else [])
-            .background_gradient(subset=['composite'], cmap='RdYlGn', vmin=0, vmax=100)
-            .format({'composite': '{:.1f}', 'pct_vs_sma200': '{:+.1f}%',
-                     'sma200_slope': '{:+.2f}%', 'range_pos_52w': '{:.0f}%',
-                     'pct_from_52w_high': '{:+.1f}%'}, na_rep='–')
-        )
-        st.dataframe(styled_s, use_container_width=True, height=600)
+            st.dataframe(styled_s, use_container_width=True, height=650)
 
 
 # ══════════════════════════════════════════════════════════════════════════

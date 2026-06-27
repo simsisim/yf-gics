@@ -132,19 +132,37 @@ def run(
         cr_map = cr.set_index('ticker')['leader_score'].to_dict()
         logger.info(f"Loaded closing range scores: {len(cr_map)} stocks")
 
-    # ── Load individual stock SCTR (optional) ─────────────────────────────
+    # ── Load individual stock SCTR — current ──────────────────────────────
+    # Use combined files only (named stock_sctr_YYYY-MM-DD.csv, not split by cap)
     sctr_map: dict[str, float] = {}
+    import glob as _glob
+    _combined = sorted(_glob.glob(str(config.stock_sctr_dir / "stock_sctr_2???.csv") + "")
+                       + _glob.glob(str(config.stock_sctr_dir / "stock_sctr_20*.csv")))
+    _combined = sorted(set(_combined))  # dedupe, keep sorted
     if label:
         sctr_path = config.stock_sctr_dir / f"stock_sctr_{label}.csv"
     else:
-        sctr_path = _latest_file(config.stock_sctr_dir, "stock_sctr_*.csv")
+        sctr_path = Path(_combined[-1]) if _combined else None
     if sctr_path and sctr_path.exists():
         try:
             sctr_df = pd.read_csv(sctr_path)
             sctr_map = sctr_df.set_index('ticker')['sctr'].to_dict()
-            logger.info(f"Loaded stock SCTR scores: {len(sctr_map)} stocks")
+            logger.info(f"Loaded stock SCTR scores: {len(sctr_map)} stocks ({sctr_path.stem})")
         except Exception as e:
             logger.warning(f"Could not load stock SCTR: {e}")
+
+    # ── Load historical SCTR (previous combined snapshot) ─────────────────
+    sctr_hist_map: dict[str, float] = {}
+    current_name  = sctr_path.name if (sctr_path and sctr_path.exists()) else ""
+    prev_combined = [f for f in _combined if Path(f).name < current_name]
+    if prev_combined:
+        prev_path = Path(prev_combined[-1])
+        try:
+            prev_df = pd.read_csv(prev_path)
+            sctr_hist_map = prev_df.set_index('ticker')['sctr'].to_dict()
+            logger.info(f"Loaded historical SCTR ({prev_path.stem}): {len(sctr_hist_map)} stocks")
+        except Exception as e:
+            logger.warning(f"Could not load historical SCTR: {e}")
 
     # ── Load industry meta ─────────────────────────────────────────────────
     sbi        = pd.read_csv(config.stocks_by_industry_csv)
@@ -201,7 +219,8 @@ def run(
         minervini_cnt = metrics['minervini_count']
         stage_score   = _STAGE_SCORE.get(stage, 45)
         cr_score      = int(cr_map.get(ticker, 0))
-        sctr_score    = float(sctr_map.get(ticker, 50.0))  # neutral 50 if missing
+        sctr_score      = float(sctr_map.get(ticker, 50.0))       # neutral 50 if missing
+        sctr_hist_score = float(sctr_hist_map.get(ticker, np.nan))  # NaN if no history
 
         meta = ind_meta.get(ind_key, {})
         raw_records.append({
@@ -218,6 +237,7 @@ def run(
             'rs_12m':         rs_12m,
             'cr_score':       cr_score,
             'sctr':           sctr_score,
+            'sctr_hist':      sctr_hist_score,
             # from stage metrics
             'pct_vs_sma200':  metrics.get('pct_vs_sma200', np.nan),
             'pct_vs_sma150':  metrics.get('pct_vs_sma150', np.nan),
@@ -285,7 +305,7 @@ def save(df: pd.DataFrame, config: Config, as_of: date | None = None) -> tuple[P
         'ind_faber', 'ind_stage',
         'composite', 'composite_pct',
         'stage', 'stage_score', 'minervini_count',
-        'rs_12m', 'rs_pct', 'sctr', 'cr_score',
+        'rs_12m', 'rs_pct', 'sctr', 'sctr_hist', 'cr_score',
         'pct_vs_sma200', 'pct_vs_sma150', 'sma200_slope',
         'range_pos_52w', 'pct_from_52w_high', 'golden_cross',
     ]
