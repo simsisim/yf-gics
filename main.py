@@ -203,7 +203,7 @@ def run_update(cfg: Config, as_of: date | None) -> None:
         ('rrg-monthly',    lambda: rrg_engine.save_monthly(rrg_engine.run_monthly(cfg, as_of=as_of), cfg, as_of=as_of)),
         ('ath',            lambda: ath_monitor.save(ath_monitor.run(cfg, as_of=as_of), cfg, as_of=as_of)),
         ('rs-ma',          lambda: rs_ma_signals.save(rs_ma_signals.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('market-clock',   lambda: market_clock.save(*market_clock.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+        ('market-clock',   lambda: market_clock.save(market_clock.run(cfg, as_of=as_of), cfg, as_of=as_of)),
         ('rs-percentile',  lambda: rs_percentile.save(rs_percentile.run(cfg, as_of=as_of), cfg, as_of=as_of)),
         ('stage',          lambda: stage_analysis.save(stage_analysis.run(cfg, as_of=as_of), cfg, as_of=as_of)),
         ('momentum',       lambda: momentum_screen.save(momentum_screen.run(cfg, as_of=as_of), cfg, as_of=as_of)),
