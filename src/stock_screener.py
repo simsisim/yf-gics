@@ -13,6 +13,7 @@ the same criteria used at the industry level:
   Stage score     Weinstein/Minervini MA structure (50/150/200-SMA)
   RS rank         12-month excess return vs SPY, percentile-ranked within
                   the screened universe
+  SCTR            StockCharts Technical Rank (0–99.9) from stock_sctr CSV
   Closing range   IBD correction leader score (F1–F5) if available from
                   the most recent closing_range CSV
   Minervini score 0–7 criteria met
@@ -20,9 +21,10 @@ the same criteria used at the industry level:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMPOSITE SCORE  (0–100)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  RS rank (12m)       × 40%
-  Stage score         × 35%   (2B=100, 2A=85, 2C=70, 1=45, 3=25, 4=5)
+  RS rank (12m)       × 35%
+  Stage score         × 30%   (2B=100, 2A=85, 2C=70, 1=45, 3=25, 4=5)
   Minervini %         × 15%   (minervini_count / 7 × 100)
+  SCTR                × 10%   (0–99.9, neutral 50 if not available)
   Closing range score × 10%   (leader_score / 5 × 100, 0 if no CR data)
 
 Filters applied before ranking:
@@ -130,6 +132,20 @@ def run(
         cr_map = cr.set_index('ticker')['leader_score'].to_dict()
         logger.info(f"Loaded closing range scores: {len(cr_map)} stocks")
 
+    # ── Load individual stock SCTR (optional) ─────────────────────────────
+    sctr_map: dict[str, float] = {}
+    if label:
+        sctr_path = config.stock_sctr_dir / f"stock_sctr_{label}.csv"
+    else:
+        sctr_path = _latest_file(config.stock_sctr_dir, "stock_sctr_*.csv")
+    if sctr_path and sctr_path.exists():
+        try:
+            sctr_df = pd.read_csv(sctr_path)
+            sctr_map = sctr_df.set_index('ticker')['sctr'].to_dict()
+            logger.info(f"Loaded stock SCTR scores: {len(sctr_map)} stocks")
+        except Exception as e:
+            logger.warning(f"Could not load stock SCTR: {e}")
+
     # ── Load industry meta ─────────────────────────────────────────────────
     sbi        = pd.read_csv(config.stocks_by_industry_csv)
     industries = pd.read_csv(config.industries_csv)
@@ -185,6 +201,7 @@ def run(
         minervini_cnt = metrics['minervini_count']
         stage_score   = _STAGE_SCORE.get(stage, 45)
         cr_score      = int(cr_map.get(ticker, 0))
+        sctr_score    = float(sctr_map.get(ticker, 50.0))  # neutral 50 if missing
 
         meta = ind_meta.get(ind_key, {})
         raw_records.append({
@@ -200,6 +217,7 @@ def run(
             'minervini_count': minervini_cnt,
             'rs_12m':         rs_12m,
             'cr_score':       cr_score,
+            'sctr':           sctr_score,
             # from stage metrics
             'pct_vs_sma200':  metrics.get('pct_vs_sma200', np.nan),
             'pct_vs_sma150':  metrics.get('pct_vs_sma150', np.nan),
@@ -232,12 +250,13 @@ def run(
         return pd.DataFrame()
 
     # ── Composite score ───────────────────────────────────────────────────
-    rs_w, st_w, mc_w, cr_w = 0.40, 0.35, 0.15, 0.10
+    rs_w, st_w, mc_w, sctr_w, cr_w = 0.35, 0.30, 0.15, 0.10, 0.10
 
     df['composite'] = (
         df['rs_pct'].astype(float).fillna(50)  * rs_w +
         df['stage_score'].astype(float)         * st_w +
         (df['minervini_count'] / 7 * 100)       * mc_w +
+        df['sctr'].astype(float).fillna(50)     * sctr_w +
         (df['cr_score'] / 5 * 100)              * cr_w
     ).round(1)
 
@@ -266,7 +285,7 @@ def save(df: pd.DataFrame, config: Config, as_of: date | None = None) -> tuple[P
         'ind_faber', 'ind_stage',
         'composite', 'composite_pct',
         'stage', 'stage_score', 'minervini_count',
-        'rs_12m', 'rs_pct', 'cr_score',
+        'rs_12m', 'rs_pct', 'sctr', 'cr_score',
         'pct_vs_sma200', 'pct_vs_sma150', 'sma200_slope',
         'range_pos_52w', 'pct_from_52w_high', 'golden_cross',
     ]
@@ -309,16 +328,18 @@ def _build_md(df: pd.DataFrame, label: str) -> str:
         ind_fab  = grp['ind_faber'].iloc[0]
         lines.append(f"## {ind_name} ({ind_fab})  — {len(grp)} stocks")
         lines.append("")
-        lines.append("| Rank | Ticker | Score | Stage | M# | RS% | CR | vs200% | vs150% | Slope | 52wPos | HiDiff% |")
-        lines.append("|-----:|--------|:-----:|:-----:|:--:|:---:|:--:|-------:|-------:|:-----:|:------:|--------:|")
+        lines.append("| Rank | Ticker | Score | Stage | M# | RS% | SCTR | CR | vs200% | vs150% | Slope | 52wPos | HiDiff% |")
+        lines.append("|-----:|--------|:-----:|:-----:|:--:|:---:|:----:|:--:|-------:|-------:|:-----:|:------:|--------:|")
         for _, r in grp.iterrows():
             gc = '✓' if r.get('golden_cross') else ''
+            sctr_val = f"{r['sctr']:.1f}" if pd.notna(r.get('sctr')) else '–'
             lines.append(
                 f"| {int(r['rank'])} | **{r['ticker']}** "
                 f"| {r['composite']:.0f} "
                 f"| {r['stage']} "
                 f"| {int(r['minervini_count'])}/7 "
                 f"| {int(r['rs_pct']) if pd.notna(r.get('rs_pct')) else '–'} "
+                f"| {sctr_val} "
                 f"| {int(r['cr_score'])}/5 "
                 f"| {r['pct_vs_sma200']:+.1f}% "
                 f"| {r['pct_vs_sma150']:+.1f}% "
@@ -330,7 +351,7 @@ def _build_md(df: pd.DataFrame, label: str) -> str:
 
     lines.append("## Methodology")
     lines.append("")
-    lines.append("**Composite** = RS rank (40%) + Stage score (35%) + Minervini% (15%) + CR score (10%)")
+    lines.append("**Composite** = RS rank (35%) + Stage score (30%) + Minervini% (15%) + SCTR (10%) + CR score (10%)")
     lines.append("")
     lines.append("**RS rank** — 12-month excess return vs SPY, percentile-ranked within this screened universe.")
     lines.append("")
@@ -361,15 +382,17 @@ def print_report(df: pd.DataFrame, top_n: int = 50) -> None:
         if ind != prev_ind:
             print(f"\n  ── {ind}  [{r['ind_faber']}]  (ind stage: {r['ind_stage']}) ──")
             print(f"  {'Rnk':>4}  {'Ticker':<8} {'Score':>6}  {'Stg':>3}  {'M#':>4}  "
-                  f"{'RS%':>4}  {'CR':>3}  {'vs200':>6}  {'vs150':>6}  {'Slp200':>7}  "
+                  f"{'RS%':>4}  {'SCTR':>5}  {'CR':>3}  {'vs200':>6}  {'vs150':>6}  {'Slp200':>7}  "
                   f"{'52wPos':>6}  {'HiDiff':>7}  {'GX'}")
             prev_ind = ind
         gc = '✓' if r.get('golden_cross') else ' '
+        sctr_val = f"{r['sctr']:5.1f}" if pd.notna(r.get('sctr')) else '   – '
         print(
             f"  {int(r['rank']):>4}  {str(r['ticker']):<8} {r['composite']:>6.1f}  "
             f"{str(r['stage']):>3}  "
             f"{int(r['minervini_count']):>2}/7  "
             f"{int(r['rs_pct']) if pd.notna(r.get('rs_pct')) else 0:>4}  "
+            f"{sctr_val}  "
             f"{int(r['cr_score']):>3}/5  "
             f"{r['pct_vs_sma200']:>+6.1f}%  "
             f"{r['pct_vs_sma150']:>+6.1f}%  "

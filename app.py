@@ -92,7 +92,10 @@ def _load(pattern: str, date_label: str) -> pd.DataFrame:
         if not files:
             return pd.DataFrame()
         p = Path(files[-1])
-    return pd.read_csv(p)
+    try:
+        return pd.read_csv(p)
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
