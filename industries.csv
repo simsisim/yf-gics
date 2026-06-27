@@ -1,0 +1,146 @@
+sector_key,sector_name,industry_key,industry_name,symbol,market_weight
+technology,Technology,semiconductors,Semiconductors,^YH31130020,0.40322134
+technology,Technology,software-infrastructure,Software - Infrastructure,^YH31110030,0.17837721
+technology,Technology,consumer-electronics,Consumer Electronics,^YH31120030,0.15895277
+technology,Technology,software-application,Software - Application,^YH31110020,0.059879467
+technology,Technology,semiconductor-equipment-materials,Semiconductor Equipment & Materials,^YH31130010,0.055133227
+technology,Technology,computer-hardware,Computer Hardware,^YH31120020,0.0503067
+technology,Technology,communication-equipment,Communication Equipment,^YH31120010,0.032043383
+technology,Technology,electronic-components,Electronic Components,^YH31120040,0.025340073
+technology,Technology,information-technology-services,Information Technology Services,^YH31110010,0.02110887
+technology,Technology,scientific-technical-instruments,Scientific & Technical Instruments,^YH31120060,0.011506849
+technology,Technology,solar,Solar,^YH31130030,0.0023384125
+technology,Technology,electronics-computer-distribution,Electronics & Computer Distribution,^YH31120050,0.0017917164
+financial-services,Financial Services,banks-diversified,Banks - Diversified,^YH10320010,0.24735674
+financial-services,Financial Services,credit-services,Credit Services,^YH10360010,0.13691288
+financial-services,Financial Services,asset-management,Asset Management,^YH10310010,0.12654114
+financial-services,Financial Services,capital-markets,Capital Markets,^YH10330010,0.119846925
+financial-services,Financial Services,insurance-diversified,Insurance - Diversified,^YH10340060,0.1054873
+financial-services,Financial Services,banks-regional,Banks - Regional,^YH10320020,0.10065997
+financial-services,Financial Services,insurance-property-casualty,Insurance - Property & Casualty,^YH10340020,0.05138572
+financial-services,Financial Services,financial-data-stock-exchanges,Financial Data & Stock Exchanges,^YH10330020,0.046596408
+financial-services,Financial Services,insurance-life,Insurance - Life,^YH10340010,0.024880102
+financial-services,Financial Services,insurance-brokers,Insurance Brokers,^YH10340050,0.02363355
+financial-services,Financial Services,insurance-specialty,Insurance - Specialty,^YH10340040,0.005859383
+financial-services,Financial Services,mortgage-finance,Mortgage Finance,^YH10320030,0.004269181
+financial-services,Financial Services,insurance-reinsurance,Insurance - Reinsurance,^YH10340030,0.0040383935
+financial-services,Financial Services,financial-conglomerates,Financial Conglomerates,^YH10350020,0.0017161134
+financial-services,Financial Services,shell-companies,Shell Companies,^YH10350010,0.0008161933
+consumer-cyclical,Consumer Cyclical,internet-retail,Internet Retail,^YH10280050,0.35059926
+consumer-cyclical,Consumer Cyclical,auto-manufacturers,Auto Manufacturers,^YH10200020,0.20961848
+consumer-cyclical,Consumer Cyclical,restaurants,Restaurants,^YH10270010,0.06696265
+consumer-cyclical,Consumer Cyclical,home-improvement-retail,Home Improvement Retail,^YH10280030,0.056462817
+consumer-cyclical,Consumer Cyclical,travel-services,Travel Services,^YH10290050,0.054917153
+consumer-cyclical,Consumer Cyclical,apparel-retail,Apparel Retail,^YH10280010,0.04108371
+consumer-cyclical,Consumer Cyclical,auto-parts,Auto Parts,^YH10200030,0.037996393
+consumer-cyclical,Consumer Cyclical,lodging,Lodging,^YH10290030,0.026388872
+consumer-cyclical,Consumer Cyclical,specialty-retail,Specialty Retail,^YH10280060,0.023172013
+consumer-cyclical,Consumer Cyclical,residential-construction,Residential Construction,^YH10230010,0.020390987
+consumer-cyclical,Consumer Cyclical,packaging-containers,Packaging & Containers,^YH10250010,0.019002331
+consumer-cyclical,Consumer Cyclical,auto-truck-dealerships,Auto & Truck Dealerships,^YH10200010,0.017288946
+consumer-cyclical,Consumer Cyclical,footwear-accessories,Footwear & Accessories,^YH10240030,0.013658283
+consumer-cyclical,Consumer Cyclical,resorts-casinos,Resorts & Casinos,^YH10290040,0.011480572
+consumer-cyclical,Consumer Cyclical,leisure,Leisure,^YH10290020,0.009481807
+consumer-cyclical,Consumer Cyclical,apparel-manufacturing,Apparel Manufacturing,^YH10240020,0.008988633
+consumer-cyclical,Consumer Cyclical,furnishings-fixtures-appliances,"Furnishings, Fixtures & Appliances",^YH10220010,0.0076943417
+consumer-cyclical,Consumer Cyclical,gambling,Gambling,^YH10290010,0.007455324
+consumer-cyclical,Consumer Cyclical,personal-services,Personal Services,^YH10260010,0.0062443693
+consumer-cyclical,Consumer Cyclical,luxury-goods,Luxury Goods,^YH10280040,0.004895964
+consumer-cyclical,Consumer Cyclical,recreational-vehicles,Recreational Vehicles,^YH10200040,0.0034020466
+consumer-cyclical,Consumer Cyclical,department-stores,Department Stores,^YH10280020,0.0025282742
+consumer-cyclical,Consumer Cyclical,textile-manufacturing,Textile Manufacturing,^YH10240010,0.00028682261
+industrials,Industrials,aerospace-defense,Aerospace & Defense,^YH31010010,0.3967208
+industrials,Industrials,specialty-industrial-machinery,Specialty Industrial Machinery,^YH31070020,0.13515964
+industrials,Industrials,farm-heavy-construction-machinery,Farm & Heavy Construction Machinery,^YH31050010,0.07368083
+industrials,Industrials,railroads,Railroads,^YH31080030,0.050942745
+industrials,Industrials,engineering-construction,Engineering & Construction,^YH31040010,0.05083876
+industrials,Industrials,building-products-equipment,Building Products & Equipment,^YH31040030,0.040819947
+industrials,Industrials,electrical-equipment-parts,Electrical Equipment & Parts,^YH31070060,0.036096092
+industrials,Industrials,integrated-freight-logistics,Integrated Freight & Logistics,^YH31080060,0.028153911
+industrials,Industrials,industrial-distribution,Industrial Distribution,^YH31060010,0.026594125
+industrials,Industrials,conglomerates,Conglomerates,^YH31030010,0.026305567
+industrials,Industrials,specialty-business-services,Specialty Business Services,^YH31020010,0.024681052
+industrials,Industrials,waste-management,Waste Management,^YH31090010,0.02308858
+industrials,Industrials,rental-leasing-services,Rental & Leasing Services,^YH31020030,0.01851472
+industrials,Industrials,airlines,Airlines,^YH31080020,0.015738128
+industrials,Industrials,trucking,Trucking,^YH31080050,0.012569795
+industrials,Industrials,metal-fabrication,Metal Fabrication,^YH31070030,0.009888112
+industrials,Industrials,tools-accessories,Tools & Accessories,^YH31070050,0.009157289
+industrials,Industrials,consulting-services,Consulting Services,^YH31020020,0.0059615383
+industrials,Industrials,marine-shipping,Marine Shipping,^YH31080040,0.004225308
+industrials,Industrials,security-protection-services,Security & Protection Services,^YH31020040,0.004178603
+industrials,Industrials,pollution-treatment-controls,Pollution & Treatment Controls,^YH31070040,0.0035873665
+industrials,Industrials,staffing-employment-services,Staffing & Employment Services,^YH31020050,0.0014660821
+industrials,Industrials,airports-air-services,Airports & Air Services,^YH31080010,0.0014440482
+industrials,Industrials,business-equipment-supplies,Business Equipment & Supplies,^YH31070010,0.00017946067
+industrials,Industrials,infrastructure-operations,Infrastructure Operations,^YH31040020,7.5608054e-06
+healthcare,Healthcare,drug-manufacturers-general,Drug Manufacturers - General,^YH20620010,0.4256075
+healthcare,Healthcare,biotechnology,Biotechnology,^YH20610010,0.13659658
+healthcare,Healthcare,healthcare-plans,Healthcare Plans,^YH20630010,0.102216296
+healthcare,Healthcare,medical-devices,Medical Devices,^YH20650010,0.094701074
+healthcare,Healthcare,diagnostics-research,Diagnostics & Research,^YH20660010,0.090333104
+healthcare,Healthcare,medical-instruments-supplies,Medical Instruments & Supplies,^YH20650020,0.057886522
+healthcare,Healthcare,medical-distribution,Medical Distribution,^YH20670010,0.027810112
+healthcare,Healthcare,medical-care-facilities,Medical Care Facilities,^YH20645010,0.027774334
+healthcare,Healthcare,drug-manufacturers-specialty-generic,Drug Manufacturers - Specialty & Generic,^YH20620020,0.02473697
+healthcare,Healthcare,health-information-services,Health Information Services,^YH20645030,0.0123027945
+healthcare,Healthcare,pharmaceutical-retailers,Pharmaceutical Retailers,^YH20645020,3.474537e-05
+consumer-defensive,Consumer Defensive,discount-stores,Discount Stores,^YH20550010,0.39192384
+consumer-defensive,Consumer Defensive,beverages-non-alcoholic,Beverages - Non-Alcoholic,^YH20520010,0.19660352
+consumer-defensive,Consumer Defensive,household-personal-products,Household & Personal Products,^YH20525030,0.14979789
+consumer-defensive,Consumer Defensive,tobacco,Tobacco,^YH20560010,0.104454435
+consumer-defensive,Consumer Defensive,packaged-foods,Packaged Foods,^YH20525040,0.044741534
+consumer-defensive,Consumer Defensive,confectioners,Confectioners,^YH20525010,0.030499473
+consumer-defensive,Consumer Defensive,farm-products,Farm Products,^YH20525020,0.02277912
+consumer-defensive,Consumer Defensive,food-distribution,Food Distribution,^YH20550020,0.022388175
+consumer-defensive,Consumer Defensive,grocery-stores,Grocery Stores,^YH20550030,0.0148067465
+consumer-defensive,Consumer Defensive,education-training-services,Education & Training Services,^YH20540010,0.009671822
+consumer-defensive,Consumer Defensive,beverages-brewers,Beverages - Brewers,^YH20510010,0.00877685
+consumer-defensive,Consumer Defensive,beverages-wineries-distilleries,Beverages - Wineries & Distilleries,^YH20510020,0.0035565635
+energy,Energy,oil-gas-integrated,Oil & Gas Integrated,^YH30910030,0.39576447
+energy,Energy,oil-gas-midstream,Oil & Gas Midstream,^YH30910040,0.2563347
+energy,Energy,oil-gas-e-p,Oil & Gas E&P,^YH30910020,0.17596269
+energy,Energy,oil-gas-equipment-services,Oil & Gas Equipment & Services,^YH30910060,0.0723768
+energy,Energy,oil-gas-refining-marketing,Oil & Gas Refining & Marketing,^YH30910050,0.06881646
+energy,Energy,uranium,Uranium,^YH30920020,0.018949687
+energy,Energy,oil-gas-drilling,Oil & Gas Drilling,^YH30910010,0.008655772
+energy,Energy,thermal-coal,Thermal Coal,^YH30920010,0.0031394474
+real-estate,Real Estate,reit-specialty,REIT - Specialty,^YH10420080,0.23901072
+real-estate,Real Estate,reit-industrial,REIT - Industrial,^YH10420030,0.17138198
+real-estate,Real Estate,reit-healthcare-facilities,REIT - Healthcare Facilities,^YH10420010,0.14801814
+real-estate,Real Estate,reit-retail,REIT - Retail,^YH10420060,0.1454186
+real-estate,Real Estate,reit-residential,REIT - Residential,^YH10420050,0.10432056
+real-estate,Real Estate,real-estate-services,Real Estate Services,^YH10410020,0.058172066
+real-estate,Real Estate,reit-mortgage,REIT - Mortgage,^YH10420070,0.036556397
+real-estate,Real Estate,reit-diversified,REIT - Diversified,^YH10420090,0.032849114
+real-estate,Real Estate,reit-office,REIT - Office,^YH10420040,0.032007832
+real-estate,Real Estate,reit-hotel-motel,REIT - Hotel & Motel,^YH10420020,0.02485202
+real-estate,Real Estate,real-estate-development,Real Estate - Development,^YH10410010,0.005183343
+real-estate,Real Estate,real-estate-diversified,Real Estate - Diversified,^YH10410030,0.0022292095
+basic-materials,Basic Materials,specialty-chemicals,Specialty Chemicals,^YH10130020,0.30571815
+basic-materials,Basic Materials,gold,Gold,^YH10150040,0.25199378
+basic-materials,Basic Materials,copper,Copper,^YH10150020,0.114878505
+basic-materials,Basic Materials,building-materials,Building Materials,^YH10120010,0.09551624
+basic-materials,Basic Materials,steel,Steel,^YH10160020,0.07511184
+basic-materials,Basic Materials,agricultural-inputs,Agricultural Inputs,^YH10110010,0.052394513
+basic-materials,Basic Materials,other-industrial-metals-mining,Other Industrial Metals & Mining,^YH10150030,0.040167637
+basic-materials,Basic Materials,chemicals,Chemicals,^YH10130010,0.01911908
+basic-materials,Basic Materials,other-precious-metals-mining,Other Precious Metals & Mining,^YH10150060,0.011920375
+basic-materials,Basic Materials,aluminum,Aluminum,^YH10150010,0.011846253
+basic-materials,Basic Materials,lumber-wood-production,Lumber & Wood Production,^YH10140010,0.009191171
+basic-materials,Basic Materials,silver,Silver,^YH10150050,0.0075981733
+basic-materials,Basic Materials,coking-coal,Coking Coal,^YH10160010,0.0037299816
+basic-materials,Basic Materials,paper-paper-products,Paper & Paper Products,^YH10140020,0.0008143722
+communication-services,Communication Services,internet-content-information,Internet Content & Information,^YH30830010,0.7416952
+communication-services,Communication Services,telecom-services,Telecom Services,^YH30810010,0.1117132
+communication-services,Communication Services,entertainment,Entertainment,^YH30820040,0.10028406
+communication-services,Communication Services,advertising-agencies,Advertising Agencies,^YH30820010,0.026474142
+communication-services,Communication Services,electronic-gaming-multimedia,Electronic Gaming & Multimedia,^YH30830020,0.016671913
+communication-services,Communication Services,publishing,Publishing,^YH30820020,0.002033484
+communication-services,Communication Services,broadcasting,Broadcasting,^YH30820030,0.0011279581
+utilities,Utilities,utilities-regulated-electric,Utilities - Regulated Electric,^YH20720020,0.67253506
+utilities,Utilities,utilities-independent-power-producers,Utilities - Independent Power Producers,^YH20710010,0.123303235
+utilities,Utilities,utilities-diversified,Utilities - Diversified,^YH20720040,0.06112701
+utilities,Utilities,utilities-regulated-gas,Utilities - Regulated Gas,^YH20720030,0.059152428
+utilities,Utilities,utilities-renewable,Utilities - Renewable,^YH20710020,0.05761072
+utilities,Utilities,utilities-regulated-water,Utilities - Regulated Water,^YH20720010,0.026271569

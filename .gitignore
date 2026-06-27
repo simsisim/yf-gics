@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Generated results (large computed outputs — not source)
+results/*.csv
+results/*.md
+results/*.html
+results/rrg/
+results/history/
+results/stock_sctr/
+results/industry_sctr/
+results/breadth/
+
+# Keep results directory structure
+!results/.gitkeep
+
+# Claude internal session state
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+*.env
+
+# Personal notes / scratch
+ideas.txt
+"Empty File"
+Empty\ File
+
+# Reference images (local only)
+*.png
+*.jpg
+*.jpeg
+
+# Academic PDFs
+lit/
