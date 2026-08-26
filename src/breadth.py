@@ -58,7 +58,7 @@ import numpy as np
 import pandas as pd
 
 from config import Config
-from src.rotation_composite import _latest_file
+from src.data_loader import _latest_file
 
 logger = logging.getLogger(__name__)
 

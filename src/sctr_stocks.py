@@ -15,8 +15,8 @@ from pathlib import Path
 import pandas as pd
 
 from config import Config
-from src.data_loader import load_daily, load_monthly
-from src.sctr_engine import compute_sctr_raw, rank_to_sctr
+from src.data_loader import load_daily
+from src.sctr_engine import compute_indicators, rank_to_sctr
 from src.universe_loader import load as load_universe, summary as universe_summary
 
 logger = logging.getLogger(__name__)
@@ -61,15 +61,7 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
                 skipped += 1
                 continue
 
-        monthly = load_monthly(ticker, config.monthly_dir, config.daily_dir)
-        if monthly is None or monthly.empty:
-            skipped += 1
-            continue
-
-        if cutoff is not None:
-            monthly = monthly[monthly.index <= cutoff]
-
-        result = compute_sctr_raw(daily, monthly)
+        result = compute_indicators(daily)
         if result is None:
             skipped += 1
             continue

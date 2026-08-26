@@ -42,7 +42,7 @@ yf-gics/
     ├── ath_monitor.py         # All-time-high tracking
     ├── market_clock.py        # Market regime detector (FTD/distribution)
     ├── sctr_engine.py         # StockCharts Technical Rank formula
-    ├── sctr_industry_gics.py  # Industry SCTR from ^YH indexes
+    ├── sctr_industry_synth.py  # Industry SCTR from ^YH indexes
     ├── sctr_industry.py       # Industry SCTR (alt method)
     ├── sctr_stocks.py         # Stock SCTR (large/mid/small cap)
     ├── sctr_breadth.py        # SCTR breadth by industry
@@ -50,7 +50,11 @@ yf-gics/
     ├── closing_range.py       # IBD correction leader filter
     ├── signal_delta.py        # Daily signal change detector
     ├── stock_screener.py      # Individual stock ranker
-    ├── backfill.py            # Historical index builder
+    ├── backfill.py            # Historical index builder (weekly SCTR + RRG, since 2021)
+    ├── perf_screener.py       # Flat 1w/2w/1m/3m/6m return + RS + relret vs SPY & QQQ
+    ├── history_metrics.py     # Shared vectorized computation for daily history tracking
+    ├── history_backfill.py    # Daily SCTR/Stage-Minervini/RS/perf history (trailing N months)
+    ├── history_tracker.py     # Go-forward daily append to that history
     ├── correction_filter.py   # Correction-period stock filter
     ├── data_loader.py         # OHLCV loader utilities
     └── universe_loader.py     # Stock universe management
@@ -89,33 +93,35 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Full daily update (recommended)
-
-Runs all 13 pipeline steps in dependency order:
+### Composite modes (recommended)
 
 ```bash
-python main.py --mode update
+python main.py --mode update      # everything: industry pipeline + stocks pipeline
+python main.py --mode industry    # all industry steps (sctr → rrg → … → signal-delta)
+python main.py --mode stocks      # all stock steps (stock-sctr → stock-screener)
 ```
 
 ### Individual modes
 
-| Mode | Description |
-|------|-------------|
-| `update` | Full pipeline — all 13 steps in order |
-| `industry-gics` | Industry SCTR from ^YH index files |
-| `rrg` | Weekly Relative Rotation Graph (daily data) |
-| `rrg-monthly` | Monthly RRG |
-| `ath` | All-time-high tracking per industry |
-| `rs-ma` | RS moving average signals |
-| `market-clock` | Market regime (uptrend/correction/stress) via FTD + distribution days |
-| `rs-percentile` | RS composite percentile ranks (1–99) |
-| `stage` | Weinstein/Minervini stage classification for all 143 industries |
-| `momentum` | 6-level Faber + Stage momentum signal |
-| `severity` | Composite rotation severity score |
-| `market-breadth` | Aggregate breadth health score + sector breakdown |
-| `closing-range` | IBD correction leader filter (F1–F5 criteria) |
-| `signal-delta` | What changed since the previous run |
-| `stock-screener` | Individual stocks within STRONG BUY / BUY industries |
+| Mode | Level | Description |
+|------|-------|-------------|
+| `sctr` | industry | Industry SCTR from ^YH index files |
+| `rrg` | industry | Weekly RRG — tactical (5/10/3) + trend (10/30/7) profiles |
+| `ath` | industry | All-time-high tracking per industry |
+| `rs-ma` | industry | RS line vs 13-week MA signals |
+| `market-clock` | industry | Market regime via FTD + distribution days |
+| `rs-percentile` | industry | RS composite percentile ranks (1–99) |
+| `perf` | industry + sector | Flat 1w/2w/1m/3m/6m return, RS, and relative return vs SPY & QQQ; also adds SCTR for the 11 sector SPDR ETFs |
+| `history-backfill` | industry + sector | Rebuilds trailing N months (default 6) of **daily** SCTR/Stage-Minervini/RS/performance history, one row per (date, symbol) |
+| `history-append` | industry + sector | Cheap go-forward: computes and upserts just today's row into that same history file |
+| `stage` | industry | Weinstein/Minervini stage classification |
+| `momentum` | industry | 6-level Faber + Stage + MG momentum signal |
+| `severity` | industry | Composite rotation severity score (master output) |
+| `market-breadth` | industry | Breadth health score + sector breakdown |
+| `signal-delta` | industry | What changed since the previous run |
+| `stock-sctr` | stocks | Stock SCTR by cap bucket (large/mid/small) |
+| `stock-screener` | stocks | Ranked stocks within STRONG BUY / BUY industries |
+| `closing-range` | stocks | IBD correction leader filter (F1–F5 criteria) |
 
 ```bash
 # Backtest as of a historical date
@@ -224,7 +230,7 @@ All outputs are written to `results/` with a date suffix:
 
 ## Key Concepts
 
-- **RRG (Relative Rotation Graph)** — RS ratio and RS momentum axes produce 4 quadrants: Leading, Weakening, Lagging, Improving. Based on Julius de Kempenaer's methodology.
+- **RRG (Relative Rotation Graph)** — RS ratio and RS momentum axes produce 4 quadrants: Leading, Weakening, Lagging, Improving. MACD Trend-Following methodology (researched against Julius de Kempenaer's work in RRGs-Dashboard). Two weekly profiles: Tactical (5/10/3) for timing, Trend (10/30/7) for structural confirmation — both output to a single CSV.
 - **SCTR** — StockCharts Technical Rank. Weighted blend of 6 technical indicators across 3 timeframes (short, medium, long).
 - **RS Composite Percentile** — Proprietary formula weighting 12-month RS most heavily: `(Q4×2 + Q3×1 + Q2×1 + Q1×1) / 5`, converted to 1–99 percentile.
 - **Market Clock** — Tracks Follow-Through Days (FTD) and distribution day counts per index to identify regime transitions.

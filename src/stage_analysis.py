@@ -63,8 +63,7 @@ import numpy as np
 import pandas as pd
 
 from config import Config
-from src.backfill import _load_all_closes, _build_industry_daily_index
-from src.rotation_composite import _latest_file
+from src.data_loader import load_daily, _latest_file
 
 logger = logging.getLogger(__name__)
 
@@ -243,25 +242,36 @@ def _compute(close: pd.Series, rs_pct: float | None) -> dict | None:
     }
 
 
-def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
+def run(config: Config, as_of: date | None = None, source: str = 'yh') -> pd.DataFrame:
     """
     Compute Stage Analysis for all GICS industries.
 
+    Loads each industry's ^YH Dow Jones Industry Index daily Close directly
+    (same pattern as sctr_industry.py) — the constituent-weighted synthetic
+    index ('synth' source) this module previously also supported was part of
+    an earlier, abandoned dual-source architecture and is no longer available
+    here. `source` is accepted only for call-site compatibility; a value other
+    than 'yh' is ignored (logged).
+
     Loads RS Percentile for criterion 7 (rs_pct_composite ≥ 70).
-    Rebuilds synthetic daily indexes from constituent stock files.
     """
+    if source != 'yh':
+        logger.warning(f"source={source!r} is no longer supported — using ^YH indexes directly.")
+
     sbi        = pd.read_csv(config.stocks_by_industry_csv)
     industries = pd.read_csv(config.industries_csv)
+    sym_map    = industries.set_index('industry_key')['symbol'].to_dict()
     ind_keys   = sorted(sbi['industry_key'].dropna().unique())
 
     cutoff = pd.Timestamp(as_of) if as_of else None
     label  = str(as_of) if as_of else None
 
     # Load RS percentile for Minervini criterion 7
+    rsp_base = config.results_dir
     if label:
-        rsp_path = config.results_dir / f"rs_percentile_{label}.csv"
+        rsp_path = rsp_base / f"rs_percentile_{label}.csv"
     else:
-        rsp_path = _latest_file(config.results_dir, "rs_percentile_*.csv")
+        rsp_path = _latest_file(rsp_base, "rs_percentile_*.csv")
     rs_pct_map: dict[str, float] = {}
     if rsp_path and rsp_path.exists():
         rsp = pd.read_csv(rsp_path).set_index('industry_key')
@@ -270,15 +280,7 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
     else:
         logger.warning("RS Percentile not found — Minervini C7 will be False for all industries")
 
-    # Load all constituent closes once
-    all_tickers = sbi['symbol'].dropna().unique().tolist()
-    logger.info(f"Loading {len(all_tickers)} constituent closes for Stage Analysis...")
-    price_matrix = _load_all_closes(all_tickers, config.daily_dir)
-    if price_matrix.empty:
-        logger.error("No daily data — check daily_dir")
-        return pd.DataFrame()
-    if cutoff is not None:
-        price_matrix = price_matrix[price_matrix.index <= cutoff]
+    logger.info("Computing Stage Analysis from ^YH indexes...")
 
     records = []
     skipped = []
@@ -287,15 +289,16 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
         if i % 30 == 0 and i > 0:
             logger.info(f"  {i}/{len(ind_keys)} industries processed...")
 
-        members = sbi[sbi['industry_key'] == ind_key]
-        tickers = members['symbol'].dropna().tolist()
-        weights = {
-            row['symbol']: float(row['marketCap'])
-            for _, row in members.iterrows()
-            if pd.notna(row.get('marketCap')) and row['marketCap'] > 0
-        }
+        yh_symbol = sym_map.get(ind_key, '')
 
-        idx_daily = _build_industry_daily_index(tickers, weights, price_matrix)
+        idx_daily = None
+        daily_df = load_daily(yh_symbol, config.daily_dir)
+        if daily_df is not None and 'Close' in daily_df.columns:
+            idx_daily = daily_df['Close'].dropna().sort_index()
+            if cutoff is not None:
+                idx_daily = idx_daily[idx_daily.index <= cutoff]
+            if idx_daily.empty:
+                idx_daily = None
         if idx_daily is None or len(idx_daily) < MIN_DAYS:
             skipped.append(ind_key)
             continue
@@ -337,9 +340,11 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
     return df
 
 
-def save(df: pd.DataFrame, config: Config, as_of: date | None = None) -> tuple[Path, Path]:
+def save(df: pd.DataFrame, config: Config, as_of: date | None = None,
+         source: str = 'yh') -> tuple[Path, Path]:
     config.setup_dirs()
-    label = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
+    label   = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
+    out_dir = config.results_dir
 
     csv_cols = [
         'rank', 'industry_key', 'sector_name', 'industry_name',
@@ -355,11 +360,11 @@ def save(df: pd.DataFrame, config: Config, as_of: date | None = None) -> tuple[P
     ]
     cols_present = [c for c in csv_cols if c in df.columns]
 
-    csv_out = config.results_dir / f"stage_analysis_{label}.csv"
+    csv_out = out_dir / f"stage_analysis_{label}.csv"
     df[cols_present].to_csv(csv_out, index=False)
     logger.info(f"Saved stage analysis CSV → {csv_out}  ({len(df)} industries)")
 
-    md_out = config.results_dir / f"stage_analysis_{label}.md"
+    md_out = out_dir / f"stage_analysis_{label}.md"
     md_out.write_text(_build_md(df, label), encoding='utf-8')
     logger.info(f"Saved stage analysis MD  → {md_out}")
 

@@ -1,7 +1,7 @@
 # SCTR Implementation Plan
 # Sector & Industry Rotation — Research Findings and Full Plan
 
-*Updated: 2026-06-29 — formula corrected to match ChartSchool authoritative source*
+*Updated: 2026-06-27*
 
 ---
 
@@ -9,42 +9,22 @@
 
 ### 1.1 The Six-Indicator Formula
 
-Source: https://chartschool.stockcharts.com/table-of-contents/technical-indicators-and-overlays/technical-indicators/stockcharts-technical-rank-sctr
+| Timeframe | Indicator | Weight | Notes |
+|---|---|---|---|
+| **Long-term** | 14-month Rate of Change (ROC) | 30% | Monthly close, 14 bars back |
+| **Long-term** | % above/below 200-day **SMA** | 15% | `(close - sma200) / sma200 * 100` |
+| **Medium-term** | 9-month ROC | 15% | Monthly close, 9 bars back |
+| **Medium-term** | % above/below 50-day **SMA** | 15% | `(close - sma50) / sma50 * 100` |
+| **Short-term** | 3-month ROC | 10% | Monthly close, 3 bars back |
+| **Short-term** | 3-day slope of PPO Histogram | 15% | PPO(12,26,9), slope = (hist[-1] - hist[-4]) / 3 |
+| **Total** | | **100%** | Group weights: 45% long / 30% medium / 25% short |
 
-**All six components use daily bars only — no monthly data needed.**
-
-| Timeframe | Indicator | Key | Weight | Notes |
-|---|---|---|---|---|
-| **Long-term** | % above/below 200-day **EMA** | `c_ema200_pct` | 30% | `(close - ema200) / ema200 * 100` |
-| **Long-term** | 125-day Rate of Change | `c_roc125` | 30% | Daily bars, 125 bars back |
-| **Medium-term** | % above/below 50-day **EMA** | `c_ema50_pct` | 15% | `(close - ema50) / ema50 * 100` |
-| **Medium-term** | 20-day Rate of Change | `c_roc20` | 15% | Daily bars, 20 bars back |
-| **Short-term** | 14-day RSI | `c_rsi14` | 5% | Wilder smoothing, range 0–100 |
-| **Short-term** | 3-day slope of PPO Histogram | `c_ppo_slope` | 5% | PPO(12,26,9); normalized 0–100 via conditional logic (see below) |
-| **Total** | | | **100%** | Group weights: 60% long / 30% medium / 10% short |
-
-**PPO slope normalization (ChartSchool conditional logic):**
-- slope ≥ +1 → score 100 (full 5 points when × 0.05)
-- slope ≤ −1 → score 0
-- otherwise → `(slope + 1) × 50` (linear interpolation on [−1, +1])
-
-**Normalization — raw values × weight (NOT per-component percentile ranking):**
-ChartSchool states explicitly: *"raw numbers are multiplied by the weighting to calculate the indicator score."*
-Example: a stock 15% above its 200-day EMA contributes `15 × 0.30 = 4.5 points`.
-
-```
-raw_score = c_ema200_pct×0.30 + c_roc125×0.30 + c_ema50_pct×0.15
-          + c_roc20×0.15 + c_rsi14×0.05 + c_ppo_slope×0.05
-```
-
-StockCharts then:
+**Critical detail:** The raw score is NOT a direct 0–99.9 value. StockCharts:
 1. Computes the raw weighted score for every stock in a universe
 2. **Ranks** all stocks by that score within their universe bucket
 3. Assigns the **percentile rank** (0.0–99.9) as the SCTR
 
 This means SCTR is always relative — a stock's SCTR changes when peers change, even if its own technicals are unchanged.
-
-> **Correction note (2026-06-29):** The original version of this plan incorrectly documented the formula as using SMA (not EMA), monthly ROC bars (14-month, 9-month, 3-month), and weights of 45/30/25. The correct formula confirmed from the authoritative ChartSchool source uses EMA, daily ROC (125-day and 20-day), RSI-14, and weights of 60/30/10. The implementation has been corrected in `src/sctr_engine.py`.
 
 ### 1.2 Universe Buckets — Hard Limits
 
@@ -110,10 +90,10 @@ The Scooter models are **not an attempt to clone StockCharts SCTR**. They are a 
 
 | Aspect | True StockCharts SCTR | stSCOOTER | fastSCOOTER |
 |---|---|---|---|
-| Primary lookback | 125-day ROC + 200-day **EMA** (daily bars) | **5 months** (125 daily bars) | ~1 month (20 daily bars) |
-| MA type | **EMA** | EMA | EMA |
-| Short component | RSI-14 + PPO slope | PPO slope + **RSI** | PPO slope + RSI |
-| Weights (L/M/S) | **60/30/10** | **60/30/10** (trend-biased) | **10/30/60** (momentum-biased) |
+| Primary lookback | 14 months (monthly bars) | **5 months** (125 daily bars) | ~1 month (20 daily bars) |
+| MA type | **SMA** | EMA | EMA |
+| Short component | 3-month ROC + PPO slope | PPO slope + **RSI** | PPO slope + RSI |
+| Weights (L/M/S) | 45/30/25 | **60/30/10** (trend-biased) | **10/30/60** (momentum-biased) |
 | Output | Percentile rank within universe | Absolute score 0–99.9 | Absolute score 0–99.9 |
 | Universe | large/mid/small buckets | All stocks together | All stocks together |
 | Purpose | Validated ranking vs peers | Trend leader identification | Early rotation warning |
@@ -157,26 +137,35 @@ These three layers answer different questions:
 
 **Goal:** Implement the true SCTR six-indicator formula as a reusable function, applicable to any price series (stock or index).
 
-**File:** `yf-gics/src/sctr_engine.py` ✅ *Implemented and corrected 2026-06-29*
+**New file:** `yf-gics/src/sctr_engine.py`
 
 ```python
-# Input: daily DataFrame only (Date, Close columns) — no monthly data needed
+# Inputs: daily DataFrame (Date, Close columns), monthly DataFrame (Date, Close)
 # Output: dict with raw component scores + weighted total
 
-def compute_indicators(daily_df) -> dict:
+def compute_sctr_raw(daily_df, monthly_df) -> dict:
     """
     Returns raw SCTR score for a single security.
     Caller is responsible for percentile ranking across universe.
 
     Components:
-      c_ema200_pct: % from 200-day EMA × 0.30   (daily)
-      c_roc125:     125-day ROC × 0.30           (daily)
-      c_ema50_pct:  % from 50-day EMA × 0.15    (daily)
-      c_roc20:      20-day ROC × 0.15            (daily)
-      c_rsi14:      14-day RSI × 0.05            (daily)
-      c_ppo_slope:  PPO(12,26,9) slope × 0.05   (daily, normalized 0-100)
+      c1: 14-month ROC × 0.30   (monthly data)
+      c2: % from 200-day SMA × 0.15
+      c3: 9-month ROC × 0.15    (monthly data)
+      c4: % from 50-day SMA × 0.15
+      c5: 3-month ROC × 0.10    (monthly data)
+      c6: PPO(12,26,9) histogram 3-day slope × 0.15
     """
 ```
+
+**Important:** For `^YH...` index files (daily-only), monthly bars are derived by resampling to month-end. For stock files, use the dedicated monthly CSVs directly.
+
+**Key differences from stSCOOTER to fix:**
+- Use **SMA** (not EMA) for 200-day and 50-day MA distance
+- Use **monthly bars** for the three ROC components
+- Add **3-month ROC** as var5 (not RSI)
+- PPO slope stays the same (already correct in stSCOOTER)
+- Remove the `50 + 2.5 * raw` transformation — output raw score only
 
 ---
 
@@ -189,8 +178,9 @@ def compute_indicators(daily_df) -> dict:
 ```
 Steps:
 1. Load all 145 ^YH daily files from downloadData_v1/data/market_data/daily/
-2. Run compute_indicators(daily_df) on each → raw score per industry (daily bars only, no resampling)
-3. Rank 145 raw scores → assign SCTR percentile (0.0–99.9) within the 145-industry universe
+2. For each: resample to month-end → get monthly close series
+3. Run compute_sctr_raw() on each → raw score per industry
+4. Rank 145 raw scores → assign SCTR percentile (0.0–99.9) within the 145-industry universe
 5. Join with industries.csv to attach GICS sector/industry_name labels
 6. Store result: (date, industry_key, gics_sector, sctr, raw_score, rank)
 
@@ -223,7 +213,7 @@ Steps:
      small:  250_000_000 <= marketCap < 2_000_000_000
      nano:   < 250_000_000  → excluded (no SCTR, same as StockCharts)
 
-2. For each stock: load daily CSV → compute_indicators(daily_df)
+2. For each stock: load daily CSV + monthly CSV → compute_sctr_raw()
 
 3. For each bucket (large/mid/small): rank stocks by raw score within bucket
    → assign SCTR 0.0–99.9
@@ -287,8 +277,9 @@ Steps:
    b. For each constituent and each date: load daily close + marketCap
    c. Compute weight_i = marketCap_i / sum(marketCap_all_constituents)
    d. synthetic_index_close = sum(weight_i * close_i)
+   e. Resample synthetic daily to monthly for ROC components
 
-2. Run compute_indicators(synthetic_daily_df) on each synthetic index series (daily bars only)
+2. Run compute_sctr_raw() on each synthetic index series
 
 3. Rank 145+ GICS industries by raw score → GICS Industry SCTR B
 
@@ -371,70 +362,59 @@ Week 5+: Dashboard integration (Phase 6), then Option B (Phase 5)
 
 | Decision | Choice | Reason |
 |---|---|---|
-| SMA vs EMA for MA distance | **EMA** | Matches ChartSchool exactly (corrected from SMA) |
-| Monthly bars | **Not needed** | All 6 components use daily bars only |
-| ROC lookbacks | **125-day and 20-day** (daily) | Matches ChartSchool (corrected from 14-month/9-month/3-month monthly) |
-| Short-term components | **RSI-14 + PPO slope** | Matches ChartSchool (corrected: 3-month ROC replaced by RSI-14) |
-| PPO slope normalization | **Conditional 0-100 score** | ChartSchool: ≥+1→100, ≤−1→0, else (slope+1)×50 |
+| SMA vs EMA for MA distance | **SMA** | Matches StockCharts exactly |
+| Monthly ROC source for `^YH...` | Resample daily to month-end | YH files only exist in daily |
+| Monthly ROC source for stocks | Use monthly CSVs directly | Cleaner, already downloaded |
 | Market cap universe classification | Current snapshot from CSV | Good enough for rotation analysis; historical cap adds little value |
-| Historical backfill start date | 2021-01-01 | Needs 210 daily bars (~10 months); daily data starts Jan 2020 |
+| Percentile ranking method | Reuse `SystematicPercentileCalculator` | Already tested, avoids duplication |
+| Historical backfill start date | 2021-01-01 | Needs 14 months of monthly bars; daily data starts Jan 2020 |
 | Database vs CSV storage | Extend `stockCharts/stockcharts.db` or separate `sctr.db` | Keep scraped and computed separate for validation |
 
 ---
 
 ## 8. The Full Signal Family — How Everything Fits Together
 
-### 8.1 Scooter Family — Legacy / TradingView Workaround
+Three distinct but complementary signal families. Nothing is being replaced.
 
-The Scooter variants (`stSCOOTER`, `fastSCOOTER`) were built as a workaround for a TradingView limitation: Pine Script processes one ticker at a time and cannot rank a stock against a universe of peers. Without universe ranking, SCTR cannot be computed correctly in TradingView, so Scooter approximates technical strength using a single ticker's own price history and outputs an absolute 0–99.9 score (no ranking step).
+### 8.1 Scooter Family (Murphy-inspired, daily-only, absolute score)
 
-**Now that the true SCTR is implemented in Python with full universe ranking, the Scooter family is largely redundant for this project.** Both signals answer the same question; true SCTR answers it correctly.
+Built from daily price data, no peer universe needed, output is an absolute 0–99.9 score.
 
-| Variant | Weights (L/M/S) | Why it was built |
-|---|---|---|
-| **stSCOOTER** | 60 / 30 / 10 | TradingView single-ticker approximation of SCTR; absolute score |
-| **fastSCOOTER** | 10 / 30 / 60 | Inverted weights for early rotation detection; absolute score |
+| Variant | Weights (L/M/S) | Core lookback | Design intent |
+|---|---|---|---|
+| **stSCOOTER** | 60 / 30 / 10 | 5 months (125-day ROC) | Identify trend leaders; the "slow" signal |
+| **fastSCOOTER** | 10 / 30 / 60 | ~1 month (20-day ROC) | Catch rotation momentum early; the "fast" signal |
 
-Code: `metaData_v1/src/basic_calculations.py:751` — retained in that project but not used in `yf-gics`.
+When stSCOOTER and fastSCOOTER are both high and rising: strong confirmation of leadership.
+When fastSCOOTER rises before stSCOOTER: early warning — a stock (or industry) may be entering rotation.
+When fastSCOOTER falls while stSCOOTER is still high: possible early exit signal from a leader.
+
+Code: `metaData_v1/src/basic_calculations.py:751` (`calculate_scooter(variant='st'|'fast')`)
 
 ### 8.2 True SCTR Family (StockCharts methodology, percentile rank, peer-relative)
 
-Built from daily price data, ranked within a cap-bucket universe. Output is a percentile rank 0–99.9 within peers.
+Built from daily + monthly price data, ranked within a cap-bucket universe. Output is a percentile rank 0–99.9 within peers.
 
-| Layer | Module | Input | Output |
-|---|---|---|---|
-| **Layer 1: Industry SCTR** | `src/sctr_industry.py` | ^YH... index daily bars | SCTR rank within 145 industries |
-| **Layer 1b: GICS Industry SCTR** | `src/sctr_industry_gics.py` | Synthetic constituent index (daily) | SCTR rank within GICS industries |
-| **Layer 2: Stock SCTR** | `src/sctr_stocks.py` | Stock daily OHLCV | SCTR rank within large / mid / small bucket |
-| **Layer 3: Industry Breadth** | `src/sctr_breadth.py` | Layer 2 aggregated by GICS industry | Median SCTR + % above 75/50/25 per industry |
+| Layer | Input | Output |
+|---|---|---|
+| **Layer 1: Industry SCTR** | ^YH... index daily (resampled to monthly) | SCTR rank within 145 industries |
+| **Layer 2: Stock SCTR** | Stock daily + monthly OHLCV | SCTR rank within large / mid / small bucket |
+| **Layer 3: Industry Breadth** | Layer 2 aggregated by GICS industry | Median SCTR + % above 75/50/25 per industry |
 
-### 8.2b Short-Term SCTR (ST-SCTR) — Inside `src/momentum_screen.py`
+Code: to be built in `yf-gics/src/` (see Phases 1–5 above).
 
-A faster derivative of the full SCTR that isolates only the ChartSchool **short-term tier** (the 10% bucket). Both components have equal 5% weight in the full SCTR, so they are split 50/50 here.
-
-| Component | Key | Full SCTR weight | ST-SCTR weight |
-|---|---|---|---|
-| 14-day RSI | `c_rsi14` | 5% | **50%** |
-| PPO(12,26,9) histogram 3-day slope | `c_ppo_slope` | 5% | **50%** |
-
-```
-sctr_st_raw = c_rsi14 × 0.50 + c_ppo_slope × 0.50
-sctr_st     = percentile_rank(sctr_st_raw, universe) → 0–99.9
-st_lead     = sctr_st − sctr_full
-```
-
-`c_roc20` (20-day ROC) is **not** used — it belongs to the medium-term tier (15% weight) and would introduce a timeframe mismatch. Only the two components that ChartSchool classifies as short-term are included.
-
-### 8.3 How to Read the Signals
+### 8.3 How to Use Them Together
 
 ```
 Scenario: Technology sector — is the recent pullback a rotation out, or noise?
 
-1. Industry SCTR (Layer 1): Semiconductors at SCTR 72, 2 weeks ago was 88 → falling
-2. Industry Breadth (Layer 3): median stock SCTR fell from 74 to 58; pct_above_75 dropped
-   from 55% to 28% → weakness is broad, not just 1–2 names
-3. RRG (weekly): Semiconductors moving from Leading toward Weakening
-4. Stock SCTR (Layer 2): find which names are still holding SCTR > 70 inside the industry
+1. Industry SCTR (Layer 1): Semiconductors at SCTR 72, 2 weeks ago was 88 → falling but not lagging yet
+2. stSCOOTER of SOXX (semis ETF): score dropped from 81 to 68 → 5-month trend weakening
+3. fastSCOOTER of SOXX: dropped sharply 2 weeks ago, now at 31 → momentum already negative
+4. Industry Breadth (Layer 3): median stock SCTR fell from 74 to 58; pct_above_75 dropped from 55% to 28%
+5. RRG (weekly): Semiconductors moving from Leading toward Weakening
 
-Conclusion: SCTR + breadth + RRG all confirm rotation is real and broad.
+Conclusion: fastSCOOTER led the signal (rotation warning), stSCOOTER confirmed it,
+SCTR and RRG confirm the rotation is real, breadth shows it's broad (not just 1–2 stocks).
+This is a Level 3–4 rotation (structural, not noise).
 ```

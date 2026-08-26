@@ -1,17 +1,28 @@
 """
 True StockCharts SCTR formula — 6 components, percentile ranking.
 
-Formula (John Murphy / StockCharts):
-  c1 = 14-month ROC                     weight 30%   (monthly bars)
-  c2 = % above/below 200-day SMA        weight 15%   (daily bars)
-  c3 = 9-month ROC                      weight 15%   (monthly bars)
-  c4 = % above/below 50-day SMA         weight 15%   (daily bars)
-  c5 = 3-month ROC                      weight 10%   (monthly bars)
-  c6 = PPO(12,26,9) histogram 3-day slope  weight 15%  (daily bars)
+Source: https://chartschool.stockcharts.com/table-of-contents/
+        technical-indicators-and-overlays/technical-indicators/
+        stockcharts-technical-rank-sctr
 
-  raw_score = c1*0.30 + c2*0.15 + c3*0.15 + c4*0.15 + c5*0.10 + c6*0.15
+Formula (StockCharts / John Murphy):
+  Long-term  (60%):
+    c_ema200_pct  = % above/below 200-day EMA          weight 30%
+    c_roc125      = 125-day Rate of Change              weight 30%
+  Medium-term (30%):
+    c_ema50_pct   = % above/below 50-day EMA            weight 15%
+    c_roc20       = 20-day Rate of Change               weight 15%
+  Short-term  (10%):
+    c_rsi14       = 14-day RSI                          weight  5%
+    c_ppo_slope   = PPO(12,26,9) histogram 3-day slope  weight  5%
+                    (normalized 0-100 via ChartSchool conditional logic)
+
+  raw_score = each component × its weight, summed directly (raw values, not
+              per-component percentile ranks — per ChartSchool documentation).
 
 SCTR = percentile rank of raw_score within the universe (0.0 – 99.9).
+
+All components use daily bars only — no monthly data needed.
 
 This module only computes scores and ranks — it does not do I/O.
 """
@@ -25,11 +36,18 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Component weights (must sum to 1.0)
-_W = dict(c1=0.30, c2=0.15, c3=0.15, c4=0.15, c5=0.10, c6=0.15)
+_W = {
+    'c_ema200_pct': 0.30,
+    'c_roc125':     0.30,
+    'c_ema50_pct':  0.15,
+    'c_roc20':      0.15,
+    'c_rsi14':      0.05,
+    'c_ppo_slope':  0.05,
+}
 
-# Minimum bar counts
-_MIN_MONTHLY = 15   # 14-month ROC needs index t-14
-_MIN_DAILY   = 210  # 200-day SMA needs 200 bars + some buffer
+# Minimum daily bars: 200-day EMA needs ~200 bars to converge; 125-day ROC
+# needs 126 bars. Keep 210 as a conservative minimum.
+_MIN_DAILY = 210
 
 
 def _roc(series: pd.Series, n: int) -> Optional[float]:
@@ -42,91 +60,120 @@ def _roc(series: pd.Series, n: int) -> Optional[float]:
     return (series.iloc[-1] - base) / base * 100.0
 
 
-def _pct_from_sma(close: pd.Series, period: int) -> Optional[float]:
-    """(close - SMA_period) / SMA_period * 100."""
+def _pct_from_ema(close: pd.Series, period: int) -> Optional[float]:
+    """(close - EMA_period) / EMA_period * 100."""
     if len(close) < period:
         return None
-    sma = close.rolling(period).mean().iloc[-1]
-    if pd.isna(sma) or sma == 0:
+    ema = close.ewm(span=period, adjust=False).mean().iloc[-1]
+    if pd.isna(ema) or ema == 0:
         return None
-    return (close.iloc[-1] - sma) / sma * 100.0
+    return (close.iloc[-1] - ema) / ema * 100.0
 
 
-def _ppo_histogram_slope(close: pd.Series) -> float:
+def _rsi(close: pd.Series, period: int = 14) -> Optional[float]:
     """
-    3-day slope of PPO(12,26,9) histogram.
-    slope = (hist[-1] - hist[-4]) / 3, clamped to [-50, 50].
+    14-day RSI using Wilder smoothing (equivalent to EWM with alpha=1/period).
+    Returns a value in [0, 100].
+    """
+    if len(close) < period + 1:
+        return None
+    delta = close.diff().dropna()
+    if len(delta) < period:
+        return None
+    gains  = delta.clip(lower=0)
+    losses = (-delta).clip(lower=0)
+    avg_gain = gains.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1]
+    avg_loss = losses.ewm(alpha=1.0 / period, adjust=False).mean().iloc[-1]
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _ppo_slope_score(close: pd.Series) -> float:
+    """
+    PPO(12,26,9) histogram 3-day slope, normalized to a 0–100 score.
+
+    ChartSchool conditional logic:
+      slope >= +1  → 100  (full points)
+      slope <= -1  →   0  (no points)
+      otherwise    → (slope + 1) * 50   (linear interpolation on [-1, +1])
+
+    Returns 50.0 (neutral) when insufficient data.
     """
     if len(close) < 35:
-        return 0.0
+        return 50.0
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     ppo   = (ema12 - ema26) / ema26.replace(0, np.nan) * 100.0
     sig   = ppo.ewm(span=9, adjust=False).mean()
     hist  = ppo - sig
     if len(hist) < 4 or pd.isna(hist.iloc[-1]) or pd.isna(hist.iloc[-4]):
-        return 0.0
+        return 50.0
     slope = (hist.iloc[-1] - hist.iloc[-4]) / 3.0
-    return float(np.clip(slope, -50.0, 50.0))
+    if slope >= 1.0:
+        return 100.0
+    if slope <= -1.0:
+        return 0.0
+    return (slope + 1.0) * 50.0
 
 
-def compute_sctr_raw(
-    daily_df: pd.DataFrame,
-    monthly_df: pd.DataFrame,
-) -> Optional[dict]:
+def compute_indicators(daily_df: pd.DataFrame) -> Optional[dict]:
     """
-    Compute the raw (un-ranked) SCTR score for a single security.
+    Compute the 6 raw SCTR indicator values for a single security.
 
     Args:
-        daily_df:   DataFrame with at least a 'Close' column, daily frequency,
-                    sorted ascending, tz-naive DatetimeIndex.
-        monthly_df: Same but monthly frequency (month-end closes).
+        daily_df: DataFrame with at least a 'Close' column, daily frequency,
+                  sorted ascending, tz-naive DatetimeIndex.
+                  Minimum _MIN_DAILY bars required.
 
     Returns:
-        dict with keys c1..c6, raw_score, and component details.
-        Returns None if there is insufficient data.
+        dict with keys:
+            c_ema200_pct, c_roc125, c_ema50_pct, c_roc20,
+            c_rsi14, c_ppo_slope (normalized 0-100), raw_score
+        Returns None if insufficient data.
     """
-    if daily_df is None or monthly_df is None:
+    if daily_df is None or daily_df.empty:
         return None
-    if len(daily_df) < _MIN_DAILY or len(monthly_df) < _MIN_MONTHLY:
-        return None
-    if 'Close' not in daily_df.columns or 'Close' not in monthly_df.columns:
+    if 'Close' not in daily_df.columns:
         return None
 
     d = daily_df['Close'].dropna()
-    m = monthly_df['Close'].dropna()
-
-    if len(d) < _MIN_DAILY or len(m) < _MIN_MONTHLY:
+    if len(d) < _MIN_DAILY:
         return None
 
-    # Monthly ROC components
-    c1 = _roc(m, 14)   # 14-month
-    c3 = _roc(m,  9)   # 9-month
-    c5 = _roc(m,  3)   # 3-month
+    c_ema200 = _pct_from_ema(d, 200)
+    c_roc125 = _roc(d, 125)
+    c_ema50  = _pct_from_ema(d, 50)
+    c_roc20  = _roc(d, 20)
+    c_rsi14  = _rsi(d, 14)
 
-    if c1 is None or c3 is None or c5 is None:
+    if any(v is None or (isinstance(v, float) and np.isnan(v))
+           for v in (c_ema200, c_roc125, c_ema50, c_roc20, c_rsi14)):
         return None
 
-    # Daily SMA distance components
-    c2 = _pct_from_sma(d, 200)
-    c4 = _pct_from_sma(d, 50)
+    c_ppo = _ppo_slope_score(d)
 
-    if c2 is None or c4 is None:
+    raw = (
+        c_ema200 * _W['c_ema200_pct'] +
+        c_roc125 * _W['c_roc125']     +
+        c_ema50  * _W['c_ema50_pct']  +
+        c_roc20  * _W['c_roc20']      +
+        c_rsi14  * _W['c_rsi14']      +
+        c_ppo    * _W['c_ppo_slope']
+    )
+
+    if np.isnan(raw):
         return None
-
-    # Daily PPO histogram slope
-    c6 = _ppo_histogram_slope(d)
-
-    raw = c1*_W['c1'] + c2*_W['c2'] + c3*_W['c3'] + c4*_W['c4'] + c5*_W['c5'] + c6*_W['c6']
 
     return {
-        'c1_14m_roc':   round(c1, 4),
-        'c2_sma200_pct': round(c2, 4),
-        'c3_9m_roc':    round(c3, 4),
-        'c4_sma50_pct': round(c4, 4),
-        'c5_3m_roc':    round(c5, 4),
-        'c6_ppo_slope': round(c6, 4),
-        'raw_score':    round(raw, 4),
+        'c_ema200_pct': round(c_ema200, 4),
+        'c_roc125':     round(c_roc125, 4),
+        'c_ema50_pct':  round(c_ema50,  4),
+        'c_roc20':      round(c_roc20,  4),
+        'c_rsi14':      round(c_rsi14,  4),
+        'c_ppo_slope':  round(c_ppo,    4),
+        'raw_score':    round(raw,       4),
     }
 
 
@@ -134,8 +181,8 @@ def rank_to_sctr(raw_scores: pd.Series) -> pd.Series:
     """
     Convert a Series of raw SCTR scores to percentile ranks 0.0 – 99.9.
 
-    Uses the same bucket approach as StockCharts: stocks are ranked by their
-    raw score within the universe, then assigned a percentile.
+    Stocks are ranked by their raw score within the universe, then assigned
+    a percentile (same approach as StockCharts).
 
     Args:
         raw_scores: pd.Series indexed by ticker symbol, values are raw scores.
@@ -145,5 +192,4 @@ def rank_to_sctr(raw_scores: pd.Series) -> pd.Series:
     """
     if raw_scores.empty:
         return raw_scores.copy()
-    # rank(pct=True) maps lowest → ~0, highest → 1.0  (method='average' for ties)
     return (raw_scores.rank(method='average', pct=True) * 99.9).round(1)

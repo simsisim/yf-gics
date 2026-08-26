@@ -60,7 +60,6 @@ import numpy as np
 import pandas as pd
 
 from config import Config
-from src.backfill import _load_all_closes, _build_industry_daily_index
 from src.data_loader import load_daily
 
 logger = logging.getLogger(__name__)
@@ -79,6 +78,18 @@ RS_NEW_HIGH_PCT     = 1.0   # within 1% = "at new high"
 RS_NEAR_HIGH_PCT    = 3.0   # within 3% = "near new high"
 
 MIN_DAYS_REQUIRED   = DAYS_Q1 + 10   # need at least 12 months + a cushion
+
+# An industry whose last bar trails SPY's (the benchmark every industry is
+# measured against) by more than this many SPY trading sessions is excluded
+# outright, not silently computed. Without this, an industry stuck weeks
+# behind still clears MIN_DAYS_REQUIRED (it has plenty of history, just none
+# of it recent) and _compute_metrics happily computes "today's" RS off
+# common = ind_daily.index ∩ spy.index - which silently collapses to the
+# stale industry's own last date. That result then gets percentile-ranked
+# next to industries computed as of today, indistinguishable from a fresh
+# one in the output. See downloadData_v1 session notes on the ^YH
+# industry-index tickers going stale for exactly this reason.
+STALE_TOLERANCE_SESSIONS = 5
 
 
 def _excess_return(prices: pd.Series, spy: pd.Series, lookback: int) -> float | None:
@@ -210,14 +221,25 @@ def _rank_to_percentile(series: pd.Series) -> pd.Series:
     return (ranks * 98 + 1).round().astype('Int64')
 
 
-def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
+def run(config: Config, as_of: date | None = None, source: str = 'yh') -> pd.DataFrame:
     """
     Compute RS Percentile ratings for all GICS industries.
 
+    Loads each industry's ^YH Dow Jones Industry Index daily Close directly
+    (same pattern as sctr_industry.py) — the constituent-weighted synthetic
+    index ('synth' source) this module previously also supported was part of
+    an earlier, abandoned dual-source architecture and is no longer available
+    here. `source` is accepted only for call-site compatibility; a value other
+    than 'yh' is ignored (logged).
+
     Returns a DataFrame with one row per industry, sorted by rs_pct_composite desc.
     """
+    if source != 'yh':
+        logger.warning(f"source={source!r} is no longer supported — using ^YH indexes directly.")
+
     sbi        = pd.read_csv(config.stocks_by_industry_csv)
     industries = pd.read_csv(config.industries_csv)
+    sym_map    = industries.set_index('industry_key')['symbol'].to_dict()
     ind_keys   = sorted(sbi['industry_key'].dropna().unique())
 
     cutoff = pd.Timestamp(as_of) if as_of else None
@@ -230,16 +252,9 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
     spy = spy_daily['Close'].sort_index()
     if cutoff is not None:
         spy = spy[spy.index <= cutoff]
+    spy_latest = spy.index.max()
 
-    # Load all constituent closes once (same as ATH monitor)
-    all_tickers = sbi['symbol'].dropna().unique().tolist()
-    logger.info(f"Loading {len(all_tickers)} constituent closes for RS Percentile...")
-    price_matrix = _load_all_closes(all_tickers, config.daily_dir)
-    if price_matrix.empty:
-        logger.error("No daily data — check daily_dir")
-        return pd.DataFrame()
-    if cutoff is not None:
-        price_matrix = price_matrix[price_matrix.index <= cutoff]
+    logger.info("Computing RS Percentile from ^YH indexes...")
 
     records = []
     skipped = []
@@ -248,16 +263,30 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
         if i % 30 == 0 and i > 0:
             logger.info(f"  {i}/{len(ind_keys)} industries processed...")
 
-        members = sbi[sbi['industry_key'] == ind_key]
-        tickers = members['symbol'].dropna().tolist()
-        weights = {
-            row['symbol']: float(row['marketCap'])
-            for _, row in members.iterrows()
-            if pd.notna(row.get('marketCap')) and row['marketCap'] > 0
-        }
+        yh_symbol = sym_map.get(ind_key, '')
 
-        idx_daily = _build_industry_daily_index(tickers, weights, price_matrix)
+        idx_daily = None
+        daily_df = load_daily(yh_symbol, config.daily_dir)
+        if daily_df is not None and 'Close' in daily_df.columns:
+            idx_daily = daily_df['Close'].dropna().sort_index()
+            if cutoff is not None:
+                idx_daily = idx_daily[idx_daily.index <= cutoff]
+            if idx_daily.empty:
+                idx_daily = None
         if idx_daily is None or len(idx_daily) < MIN_DAYS_REQUIRED:
+            skipped.append(ind_key)
+            continue
+
+        # Reject stale industries outright rather than letting
+        # _compute_metrics silently compute "today's" RS off its own
+        # truncated, out-of-date last bar (see STALE_TOLERANCE_SESSIONS).
+        ind_latest = idx_daily.index.max()
+        lag = int((spy.index > ind_latest).sum())
+        if lag > STALE_TOLERANCE_SESSIONS:
+            logger.warning(
+                f"{ind_key}: stale ({ind_latest.date()} vs SPY {spy_latest.date()}, "
+                f"{lag} SPY sessions behind) - excluded, not computed"
+            )
             skipped.append(ind_key)
             continue
 
@@ -310,10 +339,12 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
     return df
 
 
-def save(df: pd.DataFrame, config: Config, as_of: date | None = None) -> Path:
+def save(df: pd.DataFrame, config: Config, as_of: date | None = None,
+         source: str = 'yh') -> Path:
     config.setup_dirs()
-    label = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
-    out   = config.results_dir / f"rs_percentile_{label}.csv"
+    label   = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
+    out_dir = config.results_dir
+    out     = out_dir / f"rs_percentile_{label}.csv"
 
     cols = [
         'rank', 'industry_key', 'sector_name', 'industry_name',

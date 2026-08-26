@@ -5,9 +5,7 @@ Applies the true SCTR formula directly to the ^YH Dow Jones Industry Index
 price series, exactly as StockCharts does. The 145 industry indexes are
 ranked against each other to produce the industry SCTR.
 
-^YH files only exist as daily downloads; monthly bars are derived by
-resampling to month-end.
-
+All components use daily bars only — no monthly resampling needed.
 Output is labeled with GICS sector/industry names from industries.csv.
 """
 
@@ -18,8 +16,8 @@ from pathlib import Path
 import pandas as pd
 
 from config import Config
-from src.data_loader import load_daily, load_monthly, list_tickers
-from src.sctr_engine import compute_sctr_raw, rank_to_sctr
+from src.data_loader import load_daily, list_tickers
+from src.sctr_engine import compute_indicators, rank_to_sctr
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +58,7 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
             if daily.empty:
                 continue
 
-        # Monthly bars: resample from daily (no monthly file for ^YH symbols)
-        monthly = load_monthly(ticker, config.monthly_dir, config.daily_dir)
-        if monthly is None or monthly.empty:
-            continue
-
-        if as_of is not None:
-            monthly = monthly[monthly.index <= cutoff]
-
-        result = compute_sctr_raw(daily, monthly)
+        result = compute_indicators(daily)
         if result is None:
             logger.debug(f"Skipping {ticker}: insufficient data")
             continue
@@ -89,7 +79,7 @@ def run(config: Config, as_of: date | None = None) -> pd.DataFrame:
     df = pd.DataFrame(records)
     raw = df.set_index('symbol')['raw_score']
     df['sctr'] = rank_to_sctr(raw).values
-    df['rank'] = df['sctr'].rank(ascending=False, method='min').astype(int)
+    df['rank'] = df['sctr'].rank(ascending=False, method='min').fillna(0).astype(int)
     df = df.sort_values('sctr', ascending=False).reset_index(drop=True)
 
     logger.info(f"Industry SCTR computed for {len(df)} indexes")

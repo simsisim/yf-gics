@@ -11,6 +11,11 @@ Usage:
     python main.py --mode stocks   --date 2025-06-01
 
     python main.py --mode validate          # compare industry SCTR vs scraped StockCharts
+    python main.py --mode perf              # 1w/2w/1m/3m/6m return + RS + relret vs SPY & QQQ
+                                             #   (industries, sector SPDR ETFs, SPY/QQQ reference rows)
+    python main.py --mode history-backfill  # rebuild trailing 6mo daily SCTR/Stage/RS/perf history
+    python main.py --mode history-backfill --months-back 12
+    python main.py --mode history-append    # cheap: append just today's row (chain into cron)
 """
 
 import argparse
@@ -26,25 +31,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import Config
 import src.sctr_industry      as sctr_industry
-import src.sctr_industry_gics as sctr_industry_gics
 import src.sctr_stocks        as sctr_stocks
 import src.sctr_breadth       as sctr_breadth
-import src.rrg_engine          as rrg_engine
-import src.rrg_chart           as rrg_chart
-import src.rotation_composite  as rotation_composite
 import src.correction_filter   as correction_filter
-import src.backfill             as backfill
-import src.rotation_severity    as rotation_severity
-import src.ath_monitor           as ath_monitor
 import src.rs_ma_signals         as rs_ma_signals
 import src.market_clock          as market_clock
 import src.rs_percentile         as rs_percentile
-import src.momentum_screen       as momentum_screen
 import src.stage_analysis        as stage_analysis
 import src.closing_range         as closing_range
 import src.breadth               as breadth
 import src.signal_delta          as signal_delta
 import src.stock_screener        as stock_screener
+import src.perf_screener         as perf_screener
+import src.history_backfill      as history_backfill
+import src.history_tracker       as history_tracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -159,7 +159,8 @@ def run_validate(cfg: Config) -> None:
     logger.info(f"Using scraped data: {scraped_file.name}")
     scraped = pd.read_csv(scraped_file)[['symbol', 'sctr']].rename(columns={'sctr': 'sctr_scraped'})
 
-    computed_files = sorted(cfg.industry_sctr_dir.glob('industry_sctr_*.csv'))
+    computed_files = sorted(f for f in cfg.industry_sctr_dir.glob('industry_sctr_*.csv')
+                            if 'gics' not in f.name)
     if not computed_files:
         logger.error("No computed industry SCTR files found. Run --mode industry first.")
         return
@@ -191,31 +192,11 @@ def run_validate(cfg: Config) -> None:
     print(top[['name', 'sctr_scraped', 'sctr_computed']].to_string(index=False))
 
 
-def run_update(cfg: Config, as_of: date | None) -> None:
-    """
-    Full pipeline in dependency order. Each step is run independently;
-    failures are logged but do not abort subsequent steps.
-    """
-    label = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
-    steps = [
-        ('industry-gics',  lambda: sctr_industry_gics.save(sctr_industry_gics.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('rrg',            lambda: rrg_engine.save(rrg_engine.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('rrg-monthly',    lambda: rrg_engine.save_monthly(rrg_engine.run_monthly(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('ath',            lambda: ath_monitor.save(ath_monitor.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('rs-ma',          lambda: rs_ma_signals.save(rs_ma_signals.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('market-clock',   lambda: market_clock.save(market_clock.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('rs-percentile',  lambda: rs_percentile.save(rs_percentile.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('stage',          lambda: stage_analysis.save(stage_analysis.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('momentum',       lambda: momentum_screen.save(momentum_screen.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('severity',       lambda: rotation_severity.save(rotation_severity.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('market-breadth', lambda: breadth.save(*breadth.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('signal-delta',   lambda: signal_delta.save(signal_delta.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-        ('stock-screener', lambda: stock_screener.save(stock_screener.run(cfg, as_of=as_of), cfg, as_of=as_of)),
-    ]
-
+def _run_steps(steps: list, label: str, title: str) -> list[tuple[str, str]]:
+    """Run a list of (name, fn) steps, log each, return results."""
     results: list[tuple[str, str]] = []
     for name, fn in steps:
-        logger.info(f"── update: {name} ──")
+        logger.info(f"── {title}: {name} ──")
         try:
             out = fn()
             if out is None:
@@ -226,9 +207,12 @@ def run_update(cfg: Config, as_of: date | None) -> None:
         except Exception as exc:
             logger.error(f"{name} failed: {exc}", exc_info=True)
             results.append((name, f"FAIL: {exc}"))
+    return results
 
+
+def _print_summary(results: list[tuple[str, str]], label: str, title: str) -> None:
     print(f"\n{'─'*60}")
-    print(f"  Update summary — {label}")
+    print(f"  {title} — {label}")
     print(f"{'─'*60}")
     for name, status in results:
         icon = '✓' if status.startswith('OK') else ('⚠' if status.startswith('SKIP') else '✗')
@@ -236,18 +220,84 @@ def run_update(cfg: Config, as_of: date | None) -> None:
     print(f"{'─'*60}")
 
 
+def run_industry_pipeline(cfg: Config, as_of: date | None, source: str = 'yh') -> None:
+    """All industry-level steps in dependency order."""
+    label = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
+    steps = [
+        ('sctr',          lambda: sctr_industry.save(sctr_industry.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+        ('rs-ma',         lambda: rs_ma_signals.save(rs_ma_signals.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+        ('market-clock',  lambda: market_clock.save(market_clock.run(cfg, as_of=as_of)[0], cfg, as_of=as_of)),
+        ('rs-percentile', lambda: rs_percentile.save(rs_percentile.run(cfg, as_of=as_of, source=source), cfg, as_of=as_of, source=source)),
+        ('stage',         lambda: stage_analysis.save(stage_analysis.run(cfg, as_of=as_of, source=source), cfg, as_of=as_of, source=source)),
+        ('market-breadth',lambda: breadth.save(*breadth.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+        ('signal-delta',  lambda: signal_delta.save(signal_delta.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+    ]
+    results = _run_steps(steps, label, 'industry')
+    _print_summary(results, label, 'Industry pipeline')
+
+
+def run_stocks_pipeline(cfg: Config, as_of: date | None) -> None:
+    """All stock-level steps in dependency order."""
+    label = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
+    steps = [
+        ('stock-sctr',     lambda: sctr_stocks.save(sctr_stocks.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+        ('stock-screener', lambda: stock_screener.save(stock_screener.run(cfg, as_of=as_of), cfg, as_of=as_of)),
+    ]
+    results = _run_steps(steps, label, 'stocks')
+    _print_summary(results, label, 'Stocks pipeline')
+
+
+def _history_append_step(cfg: Config) -> list[Path] | None:
+    df = history_tracker.run(cfg)
+    if df.empty:
+        return None
+    return list(history_tracker.save(df, cfg).values())
+
+
+def run_update(cfg: Config, as_of: date | None, source: str = 'yh') -> None:
+    """Full pipeline — industry, then stocks, then append today's row to the daily history."""
+    run_industry_pipeline(cfg, as_of, source=source)
+    run_stocks_pipeline(cfg, as_of)
+    label = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
+    results = _run_steps([('history-append', lambda: _history_append_step(cfg))], label, 'history')
+    _print_summary(results, label, 'History tracker')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='SCTR Analysis System')
     parser.add_argument('--mode',
-                        choices=['industry', 'industry-gics', 'stocks', 'breadth',
-                                 'rrg', 'rrg-monthly', 'composite', 'correction', 'backfill',
-                                 'severity', 'ath', 'rs-ma', 'rs-percentile', 'market-clock',
-                                 'momentum', 'stage', 'closing-range', 'market-breadth',
-                                 'signal-delta', 'stock-screener', 'update', 'all', 'validate'],
-                        default='industry-gics',
+                        choices=[
+                            # ── composite modes ──────────────────────────────
+                            'update',          # industry + stocks (everything)
+                            'industry',        # all industry steps
+                            'stocks',          # all stock steps
+                            # ── industry individual steps ────────────────────
+                            'sctr',            # industry SCTR only (^YH)
+                            'rs-ma',           # RS line vs 13w MA signals
+                            'market-clock',    # Follow-Through Day / distribution days
+                            'rs-percentile',   # RS composite percentile
+                            'perf',            # flat 1w/2w/1m/3m/6m return + RS + relret vs SPY & QQQ
+                            'history-backfill',# rebuild trailing 6mo daily SCTR/Stage/RS/perf history
+                            'history-append',  # cheap go-forward: append today's row to that history
+                            'stage',           # Weinstein/Minervini stage
+                            'market-breadth',  # market health breadth score
+                            'signal-delta',    # what changed vs previous run
+                            # ── stock individual steps ───────────────────────
+                            'stock-sctr',      # stock SCTR (large/mid/small)
+                            'stock-screener',  # ranked stocks within top industries
+                            'closing-range',   # IBD correction leader filter
+                            # ── research / legacy ────────────────────────────
+                            'correction',      # legacy correction filter
+                            'validate',        # compare vs StockCharts scraped data
+                        ],
+                        default='industry',
                         help='Which analysis to run')
-    parser.add_argument('--backfill-start', default='2021-01-01',
-                        help='Start date for historical backfill (default: 2021-01-01)')
+    parser.add_argument('--source', choices=['yh', 'synth'], default='yh',
+                        help='Index source: yh=^YH published indexes (default). synth is no longer '
+                             'supported (see stage_analysis.py / rs_percentile.py docstrings) and is '
+                             'accepted only for compatibility.')
+    parser.add_argument('--months-back', type=int, default=history_backfill.DEFAULT_MONTHS_BACK,
+                        help=f'history-backfill: trailing months to rebuild (default: {history_backfill.DEFAULT_MONTHS_BACK})')
     parser.add_argument('--correction-start', default=None,
                         help='Manual correction start date YYYY-MM-DD (closing-range: auto-detected if omitted)')
     parser.add_argument('--correction-end', default=None,
@@ -268,176 +318,41 @@ def main() -> None:
 
     cfg = Config()
     cfg.universe_source = args.universe
-    as_of = parse_date(args.date)
+    as_of  = parse_date(args.date)
+    source = args.source
 
-    if args.mode == 'industry':
-        run_industry(cfg, as_of)
-    elif args.mode == 'industry-gics':
-        logger.info("=== Layer 1b: GICS Industry SCTR (synthetic constituent index) ===")
-        df = sctr_industry_gics.run(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No results")
-        else:
-            path = sctr_industry_gics.save(df, cfg, as_of=as_of)
-            cols = ['rank', 'industry_name', 'sector_name', 'constituent_count', 'sctr', 'raw_score']
-            print(f"\nTop 20 GICS industries by SCTR  (as of {as_of or 'latest'}):")
-            print(df[cols].head(20).to_string(index=False))
-            print(f"\nBottom 10:")
-            print(df[cols].tail(10).to_string(index=False))
-            print(f"\nSaved → {path}")
+    if args.mode == 'update':
+        logger.info(f"=== Full Pipeline Update (source={source}) ===")
+        run_update(cfg, as_of, source=source)
+    elif args.mode == 'industry':
+        logger.info(f"=== Industry Pipeline (source={source}) ===")
+        run_industry_pipeline(cfg, as_of, source=source)
     elif args.mode == 'stocks':
-        run_stocks(cfg, as_of)
-    elif args.mode == 'breadth':
-        run_breadth(cfg, as_of)
-    elif args.mode == 'all':
+        logger.info("=== Stocks Pipeline ===")
+        run_stocks_pipeline(cfg, as_of)
+    elif args.mode == 'sctr':
         run_industry(cfg, as_of)
+    elif args.mode == 'stock-sctr':
         run_stocks(cfg, as_of)
-        run_breadth(cfg, as_of)
-    elif args.mode == 'rrg':
-        logger.info("=== RRG: GICS Industries vs SPY (weekly) ===")
-        df = rrg_engine.run(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No RRG results")
-        else:
-            label     = str(as_of) if as_of else pd.Timestamp.today().strftime('%Y-%m-%d')
-            csv_path  = rrg_engine.save(df, cfg, as_of=as_of)
-            rrg_dir   = cfg.results_dir / 'rrg' / label
-            png_paths = rrg_chart.plot_all_sectors(df, rrg_dir, label)
-            logger.info(f"Generated {len(png_paths)} PNG charts → {rrg_dir}")
-            cols = ['industry_name', 'sector_name', 'constituent_count',
-                    'rs_ratio', 'rs_momentum', 'quadrant', 'tail_direction']
-            for quad in ['Leading', 'Improving', 'Weakening', 'Lagging']:
-                sub = df[df['quadrant'] == quad][cols]
-                print(f"\n--- {quad} ({len(sub)}) ---")
-                print(sub.head(10).to_string(index=False))
-            print(f"\nCSV  → {csv_path}")
-            print(f"PNGs → {rrg_dir}/")
-            for p in png_paths:
-                print(f"       {p.name}")
-    elif args.mode == 'rrg-monthly':
-        logger.info("=== Monthly RRG: GICS Industries vs SPY ===")
-        df = rrg_engine.run_monthly(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No monthly RRG results")
-        else:
-            path = rrg_engine.save_monthly(df, cfg, as_of=as_of)
-            cols = ['industry_name', 'sector_name', 'rs_ratio_m', 'rs_momentum_m',
-                    'quadrant_m', 'tail_direction_m']
-            for quad in ['Leading', 'Improving', 'Weakening', 'Lagging']:
-                sub = df[df['quadrant_m'] == quad][cols]
-                print(f"\n--- {quad} ({len(sub)}) ---")
-                print(sub.head(12).to_string(index=False))
-            print(f"\nSaved → {path}")
-    elif args.mode == 'composite':
-        logger.info("=== Rotation Composite ===")
-        df = rotation_composite.run(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No composite results — run industry-gics, rrg, and breadth first")
-        else:
-            path = rotation_composite.save(df, cfg, as_of=as_of)
-            display_cols = ['rank', 'industry_name', 'sector_name',
-                            'sctr', 'quadrant', 'composite', 'signal', 'convergence']
-
-            for sig in ['Strong Rotation In', 'Rotation In', 'Neutral',
-                        'Rotation Out', 'Strong Rotation Out']:
-                sub = df[df['signal'] == sig][display_cols]
-                if sub.empty:
-                    continue
-                print(f"\n{'─'*70}")
-                print(f"  {sig}  ({len(sub)})")
-                print(f"{'─'*70}")
-                print(sub.to_string(index=False))
-
-            print(f"\nSaved → {path}")
-    elif args.mode == 'ath':
-        logger.info("=== Monthly ATH Breakout Monitor ===")
-        df = ath_monitor.run(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No ATH results")
-        else:
-            path = ath_monitor.save(df, cfg, as_of=as_of)
-            cols = ['rank', 'industry_name', 'sector_name',
-                    'pct_from_ath', 'ath_date', 'months_since_ath',
-                    'months_holding_above_prev', 'ath_signal', 'ath_score']
-            for sig in ['New ATH', 'Holding Breakout', 'Near ATH', 'Recovering', 'Below ATH']:
-                sub = df[df['ath_signal'] == sig]
-                if sub.empty:
-                    continue
-                print(f"\n{'─'*72}")
-                print(f"  {sig}  ({len(sub)})")
-                print(f"{'─'*72}")
-                print(sub[cols].head(20).to_string(index=False))
-            print(f"\nSaved → {path}")
-    elif args.mode == 'severity':
-        logger.info("=== Rotation Severity Scoring ===")
-        df = rotation_severity.run(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No severity results — run --mode backfill first")
-        else:
-            path = rotation_severity.save(df, cfg, as_of=as_of)
-            display_cols = ['rank', 'industry_name', 'sector_name',
-                            'quadrant', 'quadrant_m', 'timeframe_label',
-                            'ath_signal', 'pct_from_ath',
-                            'rs_ma_signal', 'rs_weeks_above_ma',
-                            'rs_pct_composite', 'rs_pct_3m', 'rs_new_high',
-                            'stage', 'minervini_count',
-                            'momentum_score', 'faber_signal',
-                            'sctr', 'sctr_trend', 'weeks_in_quadrant', 'transition',
-                            'severity_score', 'severity_label']
-
-            sev_labels = [
-                'Both TF Confirmed + ATH', 'Both TF Confirmed',
-                'Strong Confirmed + ATH', 'Strong Confirmed',
-                'Confirmed + ATH', 'Confirmed',
-                'Early Signal', 'Pullback in Uptrend',
-                'Neutral / Watch', 'Weakening', 'Confirmed Exit',
-            ]
-            # Also include dynamic labels with RS≥80 / ★RS suffixes
-            existing = df['severity_label'].unique().tolist()
-            sev_labels += [l for l in existing if l not in sev_labels]
-
-            for label in sev_labels:
-                sub = df[df['severity_label'] == label]
-                if sub.empty:
-                    continue
-                print(f"\n{'─'*80}")
-                print(f"  {label}  ({len(sub)})")
-                print(f"{'─'*80}")
-                print(sub[display_cols].head(20).to_string(index=False))
-
-            print(f"\nSaved → {path}")
     elif args.mode == 'rs-percentile':
-        logger.info("=== RS Percentile Rating (IBD/Minervini) ===")
-        df = rs_percentile.run(cfg, as_of=as_of)
+        logger.info(f"=== RS Percentile Rating (IBD/Minervini, source={source}) ===")
+        df = rs_percentile.run(cfg, as_of=as_of, source=source)
         if df.empty:
             logger.error("No RS Percentile results computed")
         else:
-            path = rs_percentile.save(df, cfg, as_of=as_of)
+            path = rs_percentile.save(df, cfg, as_of=as_of, source=source)
             rs_percentile.print_report(df)
             print(f"\nSaved → {path}")
     elif args.mode == 'stage':
-        logger.info("=== Stage Analysis (Weinstein / Minervini) ===")
-        df = stage_analysis.run(cfg, as_of=as_of)
+        logger.info(f"=== Stage Analysis (Weinstein / Minervini, source={source}) ===")
+        df = stage_analysis.run(cfg, as_of=as_of, source=source)
         if df.empty:
             logger.error("No stage analysis results computed")
         else:
-            csv_path, md_path = stage_analysis.save(df, cfg, as_of=as_of)
+            csv_path, md_path = stage_analysis.save(df, cfg, as_of=as_of, source=source)
             stage_analysis.print_report(df)
             print(f"\nCSV → {csv_path}")
             print(f"MD  → {md_path}")
-    elif args.mode == 'momentum':
-        logger.info("=== Momentum Screen (Faber + Moskowitz-Grinblatt + ST SCTR) ===")
-        df = momentum_screen.run(cfg, as_of=as_of)
-        if df.empty:
-            logger.error("No momentum screen results — run --mode rs-percentile and --mode industry-gics first")
-        else:
-            csv_path, md_path = momentum_screen.save(df, cfg, as_of=as_of)
-            momentum_screen.print_report(df)
-            print(f"\nCSV → {csv_path}")
-            print(f"MD  → {md_path}")
-    elif args.mode == 'update':
-        logger.info("=== Full Pipeline Update ===")
-        run_update(cfg, as_of)
     elif args.mode == 'stock-screener':
         logger.info("=== Stock Screener (within top GICS industries) ===")
         df = stock_screener.run(cfg, as_of=as_of)
@@ -532,24 +447,6 @@ def main() -> None:
                 print(f"{'─'*72}")
                 print(sub[display_cols].to_string(index=False))
             print(f"\nSaved → {path}")
-    elif args.mode == 'backfill':
-        logger.info("=== Historical Backfill: Industry SCTR + RRG ===")
-        df = backfill.run(cfg, start_date=args.backfill_start)
-        if df.empty:
-            logger.error("Backfill produced no results")
-        else:
-            paths = backfill.save(df, cfg)
-            n_dates = df['date'].nunique()
-            n_inds  = df['industry_key'].nunique()
-            print(f"\nBackfill complete: {len(df)} rows  ({n_inds} industries × {n_dates} weeks)")
-            print(f"Date range: {df['date'].min()} → {df['date'].max()}")
-            print(f"\nSample (latest week, top 15 by SCTR):")
-            latest = df[df['date'] == df['date'].max()]
-            cols = ['industry_name', 'sector_name', 'sctr', 'rs_ratio', 'rs_momentum', 'quadrant']
-            print(latest.sort_values('sctr', ascending=False)[cols].head(15).to_string(index=False))
-            print("\nFiles saved:")
-            for name, p in paths.items():
-                print(f"  {name}: {p}")
     elif args.mode == 'correction':
         logger.info("=== Correction Leader Filter ===")
         corr_start = pd.Timestamp(args.correction_start) if args.correction_start else None
@@ -569,6 +466,33 @@ def main() -> None:
             print(f"\nTotal passing: {len(df)}  |  Saved → {path}")
     elif args.mode == 'validate':
         run_validate(cfg)
+    elif args.mode == 'perf':
+        logger.info("=== Performance Screener (1w/2w/1m/3m/6m, RS, relret vs SPY & QQQ) ===")
+        df = perf_screener.run(cfg, as_of=as_of)
+        if df.empty:
+            logger.error("No perf screener results computed")
+        else:
+            path = perf_screener.save(df, cfg, as_of=as_of)
+            perf_screener.print_report(df)
+            print(f"\nSaved → {path}")
+    elif args.mode == 'history-backfill':
+        logger.info(f"=== History Backfill (trailing {args.months_back} months, daily) ===")
+        df = history_backfill.run(cfg, months_back=args.months_back)
+        if df.empty:
+            logger.error("No history computed")
+        else:
+            paths = history_backfill.save(df, cfg)
+            print(f"\n{df['symbol'].nunique()} symbols x {df['date'].nunique()} dates = {len(df)} rows")
+            print(f"Saved → {paths['long']}")
+    elif args.mode == 'history-append':
+        logger.info("=== History Append (today only) ===")
+        df = history_tracker.run(cfg)
+        if df.empty:
+            logger.error("No history computed")
+        else:
+            paths = history_tracker.save(df, cfg)
+            print(f"\nHistory now: {df['symbol'].nunique()} symbols x {df['date'].nunique()} dates = {len(df)} rows")
+            print(f"Saved → {paths['long']}")
 
 
 if __name__ == '__main__':

@@ -53,7 +53,7 @@ import numpy as np
 import pandas as pd
 
 from config import Config
-from src.rotation_composite import _latest_file
+from src.data_loader import _latest_file
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,33 @@ def detect_correction_window(
 
 # ── Per-stock OHLCV loader ─────────────────────────────────────────────────
 
+def _read_daily_tiers(daily_dir: Path, ticker: str) -> pd.DataFrame | None:
+    """
+    Read archive/+current/ directly (current wins on any overlapping Date),
+    falling back to the flat legacy cache only if neither tier has this
+    ticker (e.g. a pre-migration downloadData_v1 checkout).
+    """
+    frames = []
+    for sub in ('archive', 'current'):
+        p = daily_dir / sub / f"{ticker}.csv"
+        if p.exists():
+            try:
+                frames.append(pd.read_csv(p, parse_dates=['Date']))
+            except Exception:
+                pass
+    if frames:
+        df = pd.concat(frames, ignore_index=True)
+        return df.drop_duplicates(subset='Date', keep='last')
+
+    p = daily_dir / f"{ticker}.csv"
+    if not p.exists():
+        return None
+    try:
+        return pd.read_csv(p, parse_dates=['Date'])
+    except Exception:
+        return None
+
+
 def _load_ohlcv(
     ticker: str,
     daily_dir: Path,
@@ -176,15 +203,11 @@ def _load_ohlcv(
     Load OHLCV for a ticker from warmup_start through end.
     Returns normalised DataFrame with Date (tz-naive), O/H/L/C/V columns.
     """
-    p = daily_dir / f"{ticker}.csv"
-    if not p.exists():
-        return None
-    try:
-        df = pd.read_csv(p, parse_dates=['Date'])
-    except Exception:
+    df = _read_daily_tiers(daily_dir, ticker)
+    if df is None:
         return None
 
-    df['Date'] = pd.to_datetime(df['Date'], utc=True).dt.tz_localize(None)
+    df['Date'] = pd.to_datetime(df['Date'].astype(str).str[:10])  # strip tz, keep local date
     df = df.sort_values('Date')
     df = df[(df['Date'] >= warmup_start) & (df['Date'] <= end)]
 
@@ -327,7 +350,7 @@ def run(
         spy_close = pd.Series(dtype=float)
     else:
         spy_raw = pd.read_csv(spy_path, parse_dates=['Date'])
-        spy_raw['Date'] = pd.to_datetime(spy_raw['Date'], utc=True).dt.tz_localize(None)
+        spy_raw['Date'] = pd.to_datetime(spy_raw['Date'].astype(str).str[:10])
         spy_raw = spy_raw.sort_values('Date')
         spy_raw = spy_raw[(spy_raw['Date'] >= warmup_start) & (spy_raw['Date'] <= corr_end)]
         spy_close = spy_raw.set_index('Date')['Close'].astype(float)

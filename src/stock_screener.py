@@ -43,8 +43,8 @@ import numpy as np
 import pandas as pd
 
 from config import Config
-from src.rotation_composite import _latest_file
-from src.stage_analysis import _compute as _stage_compute, MIN_DAYS, SLOPE_WINDOW
+from src.data_loader import _latest_file
+from src.stage_analysis import _compute as _stage_compute, MIN_DAYS, SLOPE_WINDOW, M_RS_MIN
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +77,36 @@ def _rank_to_pct(series: pd.Series) -> pd.Series:
 
 # ── OHLCV loader (reuse pattern from closing_range) ────────────────────────
 
-def _load_close(ticker: str, daily_dir: Path) -> pd.Series | None:
+def _read_daily_tiers(daily_dir: Path, ticker: str) -> pd.DataFrame | None:
+    """
+    Read archive/+current/ directly (current wins on any overlapping Date),
+    falling back to the flat legacy cache only if neither tier has this
+    ticker (e.g. a pre-migration downloadData_v1 checkout).
+    """
+    frames = []
+    for sub in ('archive', 'current'):
+        p = daily_dir / sub / f"{ticker}.csv"
+        if p.exists():
+            try:
+                frames.append(pd.read_csv(p, parse_dates=['Date']))
+            except Exception:
+                pass
+    if frames:
+        df = pd.concat(frames, ignore_index=True)
+        return df.drop_duplicates(subset='Date', keep='last')
+
     p = daily_dir / f"{ticker}.csv"
     if not p.exists():
         return None
     try:
-        df = pd.read_csv(p, parse_dates=['Date'])
+        return pd.read_csv(p, parse_dates=['Date'])
     except Exception:
+        return None
+
+
+def _load_close(ticker: str, daily_dir: Path) -> pd.Series | None:
+    df = _read_daily_tiers(daily_dir, ticker)
+    if df is None:
         return None
     df['Date'] = pd.to_datetime(df['Date'], utc=True).dt.tz_localize(None)
     df = df.sort_values('Date')
@@ -132,37 +155,51 @@ def run(
         cr_map = cr.set_index('ticker')['leader_score'].to_dict()
         logger.info(f"Loaded closing range scores: {len(cr_map)} stocks")
 
-    # ── Load individual stock SCTR — current ──────────────────────────────
-    # Use combined files only (named stock_sctr_YYYY-MM-DD.csv, not split by cap)
-    sctr_map: dict[str, float] = {}
-    import glob as _glob
-    _combined = sorted(_glob.glob(str(config.stock_sctr_dir / "stock_sctr_2???.csv") + "")
-                       + _glob.glob(str(config.stock_sctr_dir / "stock_sctr_20*.csv")))
-    _combined = sorted(set(_combined))  # dedupe, keep sorted
-    if label:
-        sctr_path = config.stock_sctr_dir / f"stock_sctr_{label}.csv"
-    else:
-        sctr_path = Path(_combined[-1]) if _combined else None
-    if sctr_path and sctr_path.exists():
-        try:
-            sctr_df = pd.read_csv(sctr_path)
-            sctr_map = sctr_df.set_index('ticker')['sctr'].to_dict()
-            logger.info(f"Loaded stock SCTR scores: {len(sctr_map)} stocks ({sctr_path.stem})")
-        except Exception as e:
-            logger.warning(f"Could not load stock SCTR: {e}")
+    # ── Load individual stock SCTR from split cap-bucket files ────────────
+    def _load_sctr_split(lbl: str | None) -> tuple[dict[str, float], str]:
+        """Load and merge large/mid/small SCTR files. Returns (sctr_map, label_used)."""
+        buckets = ['large', 'mid', 'small']
+        if lbl:
+            paths = [config.stock_sctr_dir / f"stock_sctr_{b}_{lbl}.csv" for b in buckets]
+            paths = [p for p in paths if p.exists()]
+        else:
+            # find latest date that has at least one bucket file
+            import glob as _glob
+            all_files = sorted(_glob.glob(str(config.stock_sctr_dir / "stock_sctr_large_*.csv")))
+            if not all_files:
+                return {}, ''
+            latest_lbl = Path(all_files[-1]).stem.replace('stock_sctr_large_', '')
+            paths = [config.stock_sctr_dir / f"stock_sctr_{b}_{latest_lbl}.csv" for b in buckets]
+            paths = [p for p in paths if p.exists()]
+            lbl = latest_lbl
+        if not paths:
+            return {}, ''
+        parts = [pd.read_csv(p) for p in paths]
+        combined = pd.concat(parts, ignore_index=True)
+        return combined.set_index('ticker')['sctr'].to_dict(), lbl or ''
 
-    # ── Load historical SCTR (previous combined snapshot) ─────────────────
+    sctr_map: dict[str, float] = {}
     sctr_hist_map: dict[str, float] = {}
-    current_name  = sctr_path.name if (sctr_path and sctr_path.exists()) else ""
-    prev_combined = [f for f in _combined if Path(f).name < current_name]
-    if prev_combined:
-        prev_path = Path(prev_combined[-1])
-        try:
-            prev_df = pd.read_csv(prev_path)
-            sctr_hist_map = prev_df.set_index('ticker')['sctr'].to_dict()
-            logger.info(f"Loaded historical SCTR ({prev_path.stem}): {len(sctr_hist_map)} stocks")
-        except Exception as e:
-            logger.warning(f"Could not load historical SCTR: {e}")
+    try:
+        sctr_map, sctr_label = _load_sctr_split(label)
+        if sctr_map:
+            logger.info(f"Loaded stock SCTR: {len(sctr_map)} stocks ({sctr_label})")
+        else:
+            logger.warning("Stock SCTR files not found — run --mode stock-sctr first. Using neutral SCTR=50.")
+    except Exception as e:
+        logger.warning(f"Could not load stock SCTR: {e}")
+
+    # ── Load historical SCTR (previous snapshot for trend) ────────────────
+    try:
+        import glob as _glob
+        all_large = sorted(_glob.glob(str(config.stock_sctr_dir / "stock_sctr_large_*.csv")))
+        prev_labels = [Path(f).stem.replace('stock_sctr_large_', '') for f in all_large
+                       if Path(f).stem.replace('stock_sctr_large_', '') < (sctr_label or 'z')]
+        if prev_labels:
+            sctr_hist_map, _ = _load_sctr_split(prev_labels[-1])
+            logger.info(f"Loaded historical SCTR ({prev_labels[-1]}): {len(sctr_hist_map)} stocks")
+    except Exception as e:
+        logger.warning(f"Could not load historical SCTR: {e}")
 
     # ── Load industry meta ─────────────────────────────────────────────────
     sbi        = pd.read_csv(config.stocks_by_industry_csv)
@@ -210,7 +247,11 @@ def run(
         else:
             rs_12m = None
 
-        metrics = _stage_compute(close, rs_pct=None)   # Minervini C7 left open
+        # rs_pct is a cross-sectional percentile rank that only exists once every
+        # stock in the universe is loaded, so C7 (RS >= 70) can't be evaluated yet
+        # here -- pass None (C7 reads False) and reconcile minervini_count once
+        # rs_pct is computed below, after the loop.
+        metrics = _stage_compute(close, rs_pct=None)
         if metrics is None:
             skipped += 1
             continue
@@ -256,6 +297,12 @@ def run(
 
     # ── RS percentile rank within this screened universe ──────────────────
     df['rs_pct'] = _rank_to_pct(pd.to_numeric(df['rs_12m'], errors='coerce'))
+
+    # ── Reconcile Minervini C7 (RS percentile >= 70) ───────────────────────
+    # minervini_count above only reflects C1-C6 (see the rs_pct=None note in
+    # the loop) -- fold C7 in now that every stock's rs_pct is known.
+    df['minervini_c7_rs70'] = df['rs_pct'].fillna(0) >= M_RS_MIN
+    df['minervini_count'] = df['minervini_count'] + df['minervini_c7_rs70'].astype(int)
 
     # ── Apply filters ─────────────────────────────────────────────────────
     pre_filter = len(df)
@@ -304,7 +351,7 @@ def save(df: pd.DataFrame, config: Config, as_of: date | None = None) -> tuple[P
         'rank', 'ticker', 'industry_key', 'sector_name', 'industry_name',
         'ind_faber', 'ind_stage',
         'composite', 'composite_pct',
-        'stage', 'stage_score', 'minervini_count',
+        'stage', 'stage_score', 'minervini_count', 'minervini_c7_rs70',
         'rs_12m', 'rs_pct', 'sctr', 'sctr_hist', 'cr_score',
         'pct_vs_sma200', 'pct_vs_sma150', 'sma200_slope',
         'range_pos_52w', 'pct_from_52w_high', 'golden_cross',

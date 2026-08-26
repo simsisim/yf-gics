@@ -5,6 +5,18 @@ Reads individual ticker CSVs and returns clean DataFrames.
 Handles both stock files (daily + monthly available) and ^YH industry
 index files (daily only — monthly is derived by resampling).
 
+Storage: downloadData_v1 splits each ticker's history into
+archive/{ticker}.csv (frozen, through last year-end) and current/{ticker}.csv
+(this year only). It also maintains a flat {ticker}.csv as a locally
+materialized archive+current cache, but that cache only refreshes when
+downloadData_v1's own pipeline runs for that ticker on this machine — if
+archive/+current/ were synced from elsewhere without a local run afterward,
+the flat file can be stale or entirely missing (this has happened: after the
+archive/current migration, 0 of ~6,300 flat files existed here). Every reader
+below reads archive/+current/ directly and only falls back to the flat file
+for a pre-migration checkout that doesn't have the tier subfolders at all —
+same approach as marketHealth/metaData_v1's data_reader.py.
+
 Stitching: historical market_data/daily files are supplemented with
 newer rows from market_data_batch/daily/prices_1d_YYYY-MM-DD.csv files.
 Batch files are loaded once into a module-level cache (BatchCache) and
@@ -131,6 +143,24 @@ def _read_csv(path: Path) -> Optional[pd.DataFrame]:
         return None
 
 
+def _read_ticker_frame(directory: Path, ticker: str) -> Optional[pd.DataFrame]:
+    """
+    Read archive/+current/ for one ticker directly (current wins on any
+    overlapping date), falling back to the flat legacy cache only if neither
+    tier subfolder has this ticker at all.
+    """
+    frames = [
+        f for f in (
+            _read_csv(directory / "archive" / f"{ticker}.csv"),
+            _read_csv(directory / "current" / f"{ticker}.csv"),
+        ) if f is not None and not f.empty
+    ]
+    if frames:
+        combined = pd.concat(frames) if len(frames) > 1 else frames[0]
+        return combined[~combined.index.duplicated(keep='last')].sort_index()
+    return _read_csv(directory / f"{ticker}.csv")
+
+
 def _ensure_batch_cache(daily_dir: Path) -> None:
     """
     Bootstrap the batch cache on first call.
@@ -143,7 +173,7 @@ def _ensure_batch_cache(daily_dir: Path) -> None:
     # Determine historical cutoff from a reference ticker
     cutoff = pd.Timestamp('2000-01-01')
     for ref in ['SPY', 'AAPL', 'MSFT', 'QQQ']:
-        df = _read_csv(daily_dir / f'{ref}.csv')
+        df = _read_ticker_frame(daily_dir, ref)
         if df is not None and not df.empty:
             cutoff = df.index.max()
             break
@@ -156,21 +186,33 @@ def _ensure_batch_cache(daily_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def load_daily(ticker: str, daily_dir: Path) -> Optional[pd.DataFrame]:
-    """Load daily OHLCV, stitching in any newer batch rows automatically."""
+    """Load daily OHLCV, stitching in any newer batch rows automatically.
+
+    Index symbols (^YH...) used to skip this entirely on the assumption
+    that downloadData_v1's batch pipeline didn't fetch them - that assumption
+    is now stale: downloadData_v1's ticker universe (combined_tickers_0-5.csv)
+    includes them and its batch pipeline fetches them fine via yf.download().
+    What actually had no ^YH coverage was the SLOW pipeline, because its
+    ticker_choice was set to a universe (0-8) that excluded all ^-prefixed
+    tickers - since fixed at the source (user_input/user_data.csv). Until the
+    slow pipeline backfills real history for these under the corrected
+    universe, batch is the ONLY source of data for them - handled below by
+    falling back to batch alone when there's no slow-pipeline file at all,
+    rather than returning None."""
     _ensure_batch_cache(daily_dir)
 
-    df = _read_csv(daily_dir / f"{ticker}.csv")
+    df = _read_ticker_frame(daily_dir, ticker)
+    batch = _BATCH_CACHE.get(ticker) if isinstance(ticker, str) else None
 
-    # Skip batch supplement for index symbols (^YH...) — batch files don't contain them
-    if not isinstance(ticker, str) or ticker.startswith('^'):
+    if batch is None:
         return df
+    if df is None or df.empty:
+        return batch  # no slow-pipeline history at all (e.g. ^YH not yet backfilled) - batch alone is what we've got
 
-    batch = _BATCH_CACHE.get(ticker)
-    if batch is not None and df is not None and not df.empty:
-        new_rows = batch[batch.index > df.index[-1]]
-        if not new_rows.empty:
-            cols = [c for c in _OHLCV if c in new_rows.columns]
-            df = pd.concat([df, new_rows[cols]])
+    new_rows = batch[batch.index > df.index[-1]]
+    if not new_rows.empty:
+        cols = [c for c in _OHLCV if c in new_rows.columns]
+        df = pd.concat([df, new_rows[cols]])
 
     return df
 
@@ -181,10 +223,8 @@ def load_monthly(ticker: str, monthly_dir: Path, daily_dir: Path) -> Optional[pd
     Falls back to resampling the daily file (needed for ^YH... index symbols
     which are only downloaded at daily frequency).
     """
-    monthly_path = monthly_dir / f"{ticker}.csv"
-    if monthly_path.exists():
-        # For monthly files, also stitch batch data via daily resample
-        monthly = _read_csv(monthly_path)
+    monthly = _read_ticker_frame(monthly_dir, ticker)
+    if monthly is not None and not monthly.empty:
         # Supplement: re-resample from stitched daily if ticker has batch rows
         if not ticker.startswith('^'):
             daily = load_daily(ticker, daily_dir)
@@ -218,21 +258,42 @@ def load_monthly(ticker: str, monthly_dir: Path, daily_dir: Path) -> Optional[pd
 
 def get_market_cap(ticker: str, daily_dir: Path) -> Optional[float]:
     """
-    Read the most recent marketCap value from the daily CSV.
-    Returns None if the column is missing or the file doesn't exist.
+    Read the most recent marketCap value, checking current/ (freshest) then
+    archive/, then the flat legacy cache as a last resort.
+    Returns None if the column is missing everywhere or no file exists.
     """
-    path = daily_dir / f"{ticker}.csv"
-    if not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path, usecols=['marketCap'])
-        vals = df['marketCap'].dropna()
-        return float(vals.iloc[-1]) if not vals.empty else None
-    except Exception:
-        return None
+    for path in (daily_dir / "current" / f"{ticker}.csv",
+                 daily_dir / "archive" / f"{ticker}.csv",
+                 daily_dir / f"{ticker}.csv"):
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path, usecols=['marketCap'])
+            vals = df['marketCap'].dropna()
+            if not vals.empty:
+                return float(vals.iloc[-1])
+        except Exception:
+            continue
+    return None
+
+
+def _latest_file(directory: Path, pattern: str) -> Optional[Path]:
+    """Return the most recent file matching `pattern` in `directory` (sorted by
+    filename, so patterns should embed a sortable YYYY-MM-DD date), or None if
+    no file matches."""
+    files = sorted(directory.glob(pattern))
+    return files[-1] if files else None
 
 
 def list_tickers(directory: Path, prefix: str = '') -> list[str]:
-    """List all ticker symbols available in a directory, optionally filtered by prefix."""
-    tickers = [f.stem for f in directory.glob('*.csv') if f.stem.startswith(prefix)]
+    """
+    List all ticker symbols available in a directory, optionally filtered by
+    prefix. Checks archive/+current/ tiers as well as the flat directory, so
+    this doesn't silently under-count if the flat legacy cache is stale.
+    """
+    tickers = {f.stem for f in directory.glob('*.csv') if f.stem.startswith(prefix)}
+    for tier in ("archive", "current"):
+        d = directory / tier
+        if d.exists():
+            tickers.update(f.stem for f in d.glob('*.csv') if f.stem.startswith(prefix))
     return sorted(tickers)

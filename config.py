@@ -46,8 +46,7 @@ class Config:
     universe_source: str = 'sc'
 
     # --- SCTR formula minimum data requirements ---
-    min_daily_bars:   int = 210   # 200-day SMA needs 200+ bars
-    min_monthly_bars: int = 15    # 14-month ROC needs 15 monthly closes
+    min_daily_bars: int = 210   # 200-day EMA convergence (~200 bars) + 125-day ROC (126 bars)
 
     def setup_dirs(self) -> None:
         for d in [self.results_dir, self.industry_sctr_dir, self.stock_sctr_dir, self.breadth_dir]:
