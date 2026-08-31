@@ -820,6 +820,18 @@ def _snap_for_ytd(today_iso: str, available_desc: list[str]) -> str | None:
     return candidates[0] if candidates else None
 
 
+def _name_with_count(name: str, count) -> str:
+    """Industry name with its member-company count in parens, e.g. 'Gold (527)'."""
+    if pd.isna(count):
+        return name
+    return f"{name} ({int(count)})"
+
+
+def _strip_count(name: str) -> str:
+    """Inverse of _name_with_count — drop a trailing ' (123)' for lookups."""
+    return re.sub(r"\s*\(\d+\)$", "", name)
+
+
 def build_ranks_df(
     all_df: pd.DataFrame,
     rank_by: str,
@@ -839,7 +851,7 @@ def build_ranks_df(
         rank_frames[d] = day[["symbol", col]]
 
     base = all_df[all_df["snapshot_date"] == today][
-        ["symbol", "name", "sector", "sctr", "last", "pct_1m", "pct_3m", "pct_ytd"]
+        ["symbol", "name", "sector", "sctr", "last", "pct_1m", "pct_3m", "pct_ytd", "child_count"]
     ].copy()
     base = base.sort_values(rank_by, ascending=False, na_position="last").reset_index(drop=True)
 
@@ -875,11 +887,12 @@ def build_ranks_df(
             )
 
     base.insert(0, "Rank", range(1, len(base) + 1))
+    base["name"] = [_name_with_count(n, c) for n, c in zip(base["name"], base["child_count"])]
     base = base.rename(columns={
         "name": "Name", "sector": "Sector",
         "sctr": "SCTR", "pct_1m": "1M%",
         "pct_3m": "3M%", "pct_ytd": "YTD%",
-    }).drop(columns=["symbol", "last"])
+    }).drop(columns=["symbol", "last", "child_count"])
 
     return base
 
@@ -926,9 +939,11 @@ def build_compact_ranks_df(
     _pct_src = ["pct_1d", "pct_1w", "pct_1m", "pct_3m", "pct_6m", "pct_1y", "pct_ytd"]
     _avail   = [c for c in _pct_src if c in all_df.columns]
     base = all_df[all_df["snapshot_date"] == today][
-        ["symbol", "name", "sector", "sctr"] + _avail
+        ["symbol", "name", "sector", "sctr", "child_count"] + _avail
     ].copy()
     base = base.sort_values(rank_by, ascending=False, na_position="last").reset_index(drop=True)
+    base["name"] = [_name_with_count(n, c) for n, c in zip(base["name"], base["child_count"])]
+    base = base.drop(columns=["child_count"])
     base["Rank"] = base["symbol"].map(today_ranks)
 
     def _delta_str(old_rank, new_rank):
@@ -1901,7 +1916,7 @@ with tab_ranks:
             if selected_rows:
                 row_idx = selected_rows[0]
                 _row = display_df.iloc[row_idx]
-                industry_name = _row["Name"]
+                industry_name = _strip_count(_row["Name"])
                 _perf_keys = ["SCTR", "1D%", "1W%", "1M%", "3M%", "6M%", "1Y%", "YTD%"]
                 perf = {k: _row[k] for k in _perf_keys if k in display_df.columns}
                 show_industry_drilldown(industry_name, rk_as_of, perf, tuple(dates_ind))
