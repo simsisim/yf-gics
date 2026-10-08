@@ -97,3 +97,9 @@ python main.py --mode momentum-compare  # yh vs synth side-by-side comparison
 ```bash
 streamlit run app.py
 ```
+
+# Dashboard DB (data/yf_dashboard.db) — run in this order; dates already present are overwritten
+python -m src.yf_industry_compute --last 1        # industry_summary + sector_summary from ^YH indexes (--last N / --as-of DATE)
+python -m src.yf_stock_compute --last 1           # sctr_rankings (large/mid/small + industry) + benchmarks
+python -m src.yf_key_indices_compute              # key_indices closes since 2025-05-01 (Key Index Ranks tab)
+streamlit run app.py

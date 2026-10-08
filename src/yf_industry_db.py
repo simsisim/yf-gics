@@ -5,14 +5,16 @@ Schema-compatible port of stockCharts' src/db.py — same tables, same
 columns, same UNIQUE constraints, same SQL — so the dashboard port can
 read it with no query changes. Only the default db_path differs
 (data/yf_dashboard.db instead of data/stockcharts.db) and the
-new_highs_lows / index_membership pieces are omitted (the 52-Week
-Highs/Lows tab they serve is out of scope for this project).
+index_membership table is omitted (it only serves the Screener, which is
+out of scope for this project).
 
 Tables:
     sector_summary    — one row per (snapshot_date, symbol)  — sector indexes
     industry_summary  — one row per (snapshot_date, symbol)
     sctr_rankings     — one row per (snapshot_date, group, symbol)
     benchmarks        — one row per (snapshot_date, symbol)  — EOD close
+    key_indices       — one row per (snapshot_date, symbol)  — macro indices + size/style/bond ETFs, deep EOD close
+    new_highs_lows    — one row per (snapshot_date, symbol, direction) — stocks/industries at a new 52w high/low
     universe          — one row per symbol (latest group label + metadata)
                         rebuilt from sctr_rankings via rebuild_universe()
 
@@ -147,6 +149,50 @@ CREATE TABLE IF NOT EXISTS benchmarks (
 """
 
 
+# ── key_indices ──────────────────────────────────────────────────────────────
+# Macro indices + size/style/bond ETFs — EOD close only, deep history.
+# Kept separate from `benchmarks` (which is the small 4-symbol vs-benchmark set).
+
+_KEYIDX_COLS = ["snapshot_date", "symbol", "close"]
+
+_CREATE_KEY_INDICES = """
+CREATE TABLE IF NOT EXISTS key_indices (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    close         REAL,
+    UNIQUE(snapshot_date, symbol)
+);
+"""
+
+
+# ── new_highs_lows ───────────────────────────────────────────────────────────
+
+_NHL_COLS = [
+    "snapshot_date", "symbol", "name", "exchange", "sector", "industry",
+    "last", "volume", "sctr", "cap_tier", "category", "direction",
+]
+
+_CREATE_NHL = """
+CREATE TABLE IF NOT EXISTS new_highs_lows (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    name          TEXT,
+    exchange      TEXT,
+    sector        TEXT,
+    industry      TEXT,
+    last          REAL,
+    volume        REAL,
+    sctr          REAL,
+    cap_tier      TEXT,
+    category      TEXT NOT NULL,
+    direction     TEXT NOT NULL,
+    UNIQUE(snapshot_date, symbol, direction)
+);
+"""
+
+
 # ── universe ──────────────────────────────────────────────────────────────────
 
 _CREATE_UNIVERSE = """
@@ -183,6 +229,8 @@ class YfIndustryDB:
             conn.execute(_CREATE_SCTR)
             conn.execute(_CREATE_BENCHMARKS)
             conn.execute(_CREATE_UNIVERSE)
+            conn.execute(_CREATE_KEY_INDICES)
+            conn.execute(_CREATE_NHL)
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -462,6 +510,60 @@ class YfIndustryDB:
             return [r[0] for r in conn.execute(
                 "SELECT DISTINCT symbol FROM benchmarks ORDER BY symbol"
             ).fetchall()]
+
+    # ── key_indices ───────────────────────────────────────────────────────────
+
+    def upsert_key_indices(self, df: pd.DataFrame) -> None:
+        rows = [
+            {
+                "snapshot_date": str(r["snapshot_date"]),
+                "symbol":        str(r["symbol"]),
+                "close":         _clean(r["close"]),
+            }
+            for _, r in df.iterrows()
+        ]
+        ph  = ", ".join(f":{c}" for c in _KEYIDX_COLS)
+        sql = (
+            f"INSERT INTO key_indices ({', '.join(_KEYIDX_COLS)}) "
+            f"VALUES ({ph}) "
+            f"ON CONFLICT(snapshot_date, symbol) DO UPDATE SET close=excluded.close"
+        )
+        with self._conn() as conn:
+            conn.executemany(sql, rows)
+        n_sym = df["symbol"].nunique() if not df.empty else 0
+        print(f"  DB: {len(rows)} key-index rows upserted  ({n_sym} symbols)")
+
+    # ── new_highs_lows ────────────────────────────────────────────────────────
+
+    def upsert_new_highs_lows(self, df: pd.DataFrame, snapshot_date: str | None = None) -> None:
+        today = snapshot_date or date.today().isoformat()
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                "snapshot_date": today,
+                "symbol":        _clean(r.get("symbol", "")),
+                "name":          _clean(r.get("name")),
+                "exchange":      _clean(r.get("exchange")),
+                "sector":        _clean(r.get("sector")),
+                "industry":      _clean(r.get("industry")),
+                "last":          _clean(r.get("last")),
+                "volume":        _clean(r.get("volume")),
+                "sctr":          _clean(r.get("sctr")),
+                "cap_tier":      _clean(r.get("cap_tier")),
+                "category":      _clean(r.get("category", "")),
+                "direction":     _clean(r.get("direction", "")),
+            })
+
+        ph  = ", ".join(f":{c}" for c in _NHL_COLS)
+        upd = ", ".join(f"{c}=excluded.{c}" for c in _NHL_COLS if c not in ("snapshot_date", "symbol", "direction"))
+        sql = (
+            f"INSERT INTO new_highs_lows ({', '.join(_NHL_COLS)}) "
+            f"VALUES ({ph}) "
+            f"ON CONFLICT(snapshot_date, symbol, direction) DO UPDATE SET {upd}"
+        )
+        with self._conn() as conn:
+            conn.executemany(sql, rows)
+        print(f"  DB: {len(rows)} new-highs/lows rows upserted  [{today}]")
 
     # ── universe ──────────────────────────────────────────────────────────────
 

@@ -1478,6 +1478,85 @@ def _sector_filter_values(sectors_sel: list[str]) -> set[str]:
     return values
 
 
+# ── ^YH data-quality flags ────────────────────────────────────────────────────
+# src/yf_industry_compute.py logs implausible single-day moves (>15%) in the ^YH
+# industry/sector indexes, per snapshot, to results/yf_index_quality_flags.csv.
+# Yahoo never corrects these, and prices stay unchanged in the DB, so the flags
+# are surfaced next to the affected names instead.
+
+_QUALITY_FLAGS_FILE = Path(__file__).parent / "results" / "yf_index_quality_flags.csv"
+FLAG_COL = "⚠️"
+FLAG_COL_CFG = {
+    FLAG_COL: st.column_config.TextColumn(
+        FLAG_COL, width="small",
+        help="Largest suspect single-day move (>15%) in this ^YH index that still "
+             "affects its score — likely a Yahoo feed artifact. Details in the "
+             "data-quality expander below the table.",
+    ),
+}
+
+
+@st.cache_data(ttl=300)
+def load_quality_flags() -> pd.DataFrame:
+    try:
+        return pd.read_csv(_QUALITY_FLAGS_FILE, dtype={"snapshot_date": str, "jump_date": str})
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame(columns=["snapshot_date", "pool", "symbol", "name", "jump_date",
+                                     "pct_move", "pct_unreverted", "kind"])
+
+
+def quality_flags_at(as_of: str, pool: str) -> pd.DataFrame:
+    """Flags ('industry' or 'sector' pool) from the latest flagged snapshot on/before as_of."""
+    f = load_quality_flags()
+    f = f[(f["pool"] == pool) & (f["snapshot_date"] <= as_of)]
+    return f[f["snapshot_date"] == f["snapshot_date"].max()] if not f.empty else f
+
+
+def _flag_summary(g: pd.DataFrame) -> str:
+    top = g.loc[g["pct_move"].abs().idxmax()]
+    more = f" (+{len(g) - 1})" if len(g) > 1 else ""
+    return f"{top['pct_move']:+.0f}% {_fmt_date(top['jump_date'])}{more}"
+
+
+def add_quality_flag_column(df: pd.DataFrame, as_of: str, pool: str,
+                            name_col: str = "Name") -> pd.DataFrame:
+    """Insert FLAG_COL right after name_col (names may carry a '(count)' suffix)."""
+    flags = quality_flags_at(as_of, pool)
+    if flags.empty or name_col not in df.columns or FLAG_COL in df.columns:
+        return df
+    summary = {name: _flag_summary(g) for name, g in flags.groupby("name")}
+    out = df.copy()
+    out.insert(out.columns.get_loc(name_col) + 1, FLAG_COL,
+               out[name_col].map(lambda n: summary.get(_strip_count(str(n)), "")))
+    return out
+
+
+def quality_flags_expander(as_of: str, pool: str) -> None:
+    flags = quality_flags_at(as_of, pool)
+    if flags.empty:
+        return
+    n = flags["name"].nunique()
+    with st.expander(f"⚠️ Data quality — {n} {pool} index{'es' if n != 1 else ''} with suspect price jumps"):
+        st.caption(
+            "Single-day moves >15% in Yahoo's ^YH index series. 'fresh' = in the last 15 "
+            "sessions; 'unreverted' = the price level never came back, so the jump still "
+            "skews SCTR (ROC125/EMA200) and the % columns. Prices are left as Yahoo "
+            f"published them. Flags as of {_fmt_date(flags['snapshot_date'].iloc[0])}."
+        )
+        st.dataframe(
+            flags[["name", "symbol", "jump_date", "pct_move", "pct_unreverted", "kind"]]
+            .sort_values(["name", "jump_date"]).reset_index(drop=True),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "name": st.column_config.TextColumn("Name"),
+                "jump_date": st.column_config.TextColumn("Jump date"),
+                "pct_move": st.column_config.NumberColumn("1-day move", format="%+.1f%%"),
+                "pct_unreverted": st.column_config.NumberColumn("Still displaced", format="%+.1f%%"),
+                "kind": st.column_config.TextColumn("Kind"),
+            },
+        )
+
+
 def _search_filter(df: pd.DataFrame, query: str) -> pd.DataFrame:
     """Case-insensitive substring filter across every column's string form."""
     q = query.strip().lower()
@@ -1813,6 +1892,16 @@ def render_industry_drilldown(
     if show_title:
         st.markdown(f"### {industry_name}  ·  {_fmt_date(snapshot_date)}")
 
+    _flags = quality_flags_at(snapshot_date, "industry")
+    _flags = _flags[_flags["name"] == industry_name]
+    if not _flags.empty:
+        st.warning(
+            "⚠️ Suspect jumps in this industry's ^YH index (likely Yahoo feed artifacts) — "
+            "headline SCTR and % figures may be distorted: "
+            + "; ".join(f"{r.pct_move:+.0f}% on {_fmt_date(r.jump_date)}"
+                        for r in _flags.sort_values("jump_date").itertuples())
+        )
+
     # ── industry performance bar ──────────────────────────────────────────────
     _perf_labels = [
         ("SCTR",  "SCTR",  "{:.1f}"),
@@ -1948,10 +2037,10 @@ def show_sector_drilldown(
 
         _bench_note = f" · Price % relative to benchmark" if bench_ser is not None else ""
         st.caption(f"Δ Rank = rank change vs {_rlbl}{_bench_note}")
-        st.dataframe(ind_ranks.reset_index(drop=True),
+        st.dataframe(add_quality_flag_column(ind_ranks, as_of, "industry").reset_index(drop=True),
                      use_container_width=True, hide_index=True,
                      height=min(480, 40 + n_industries * 38),
-                     column_config=_ind_col_cfg)
+                     column_config={**_ind_col_cfg, **FLAG_COL_CFG})
 
     else:
         # ── rolling window table ──────────────────────────────────────────────
@@ -1971,10 +2060,11 @@ def show_sector_drilldown(
         _bench_note = f" · Price % relative to benchmark" if bench_ser is not None else ""
         st.caption(f"Ranked by {rank_by} · {len(window_dates)+1} snapshots{_bench_note}")
         st.dataframe(
-            ind_compact[[c for c in show_cols if c in ind_compact.columns]].reset_index(drop=True),
+            add_quality_flag_column(ind_compact[[c for c in show_cols if c in ind_compact.columns]],
+                                    as_of, "industry").reset_index(drop=True),
             use_container_width=True, hide_index=True,
             height=min(480, 40 + n_industries * 38),
-            column_config=_ind_col_cfg,
+            column_config={**_ind_col_cfg, **FLAG_COL_CFG},
         )
 
 
@@ -2248,6 +2338,7 @@ if _active_tab == "🏆 Industry Ranks":
 
             show_cols = ["Rank", "Name", "Sector", "Last"] + selected_metrics + _delta_cols
             display_df = compact_df[[c for c in show_cols if c in compact_df.columns]]
+            display_df = add_quality_flag_column(display_df, rk_as_of, "industry")
 
             rk_search = st.text_input(
                 "Search", key="rk_search",
@@ -2257,6 +2348,7 @@ if _active_tab == "🏆 Industry Ranks":
 
             _pct_fmt = "%.2f%%"
             col_cfg = {
+                **FLAG_COL_CFG,
                 "Last": st.column_config.NumberColumn("Last", format="%.2f"),
                 "SCTR": st.column_config.NumberColumn("SCTR", format="%.1f"),
                 "1D%":  st.column_config.NumberColumn("1D%",  format=_pct_fmt),
@@ -2307,6 +2399,7 @@ if _active_tab == "🏆 Industry Ranks":
                 on_select=_rk_on_select,
                 key=_rk_tbl_key,
             )
+            quality_flags_expander(rk_as_of, "industry")
 
             _dd_name = st.session_state.get("rk_dd_industry")
             if _dd_name in _rk_names:
@@ -2361,11 +2454,13 @@ if _active_tab == "🏆 Industry Ranks":
 
                 ranks_df = build_ranks_df(all_ind, rank_by, rk_as_of, [resolved],
                                           bench_ser=_rk_bench_ser)
+                ranks_df = add_quality_flag_column(ranks_df, rk_as_of, "industry")
 
                 _rlbl = _fmt_date(resolved)
                 _vs_price_col_r = f"Δ Price% {_rlbl}"
                 date_cols = [_fmt_date(d) for d in [rk_as_of, resolved]]
                 col_cfg_r = {
+                    **FLAG_COL_CFG,
                     "SCTR":   st.column_config.NumberColumn("SCTR", format="%.1f"),
                     "Last":   st.column_config.NumberColumn("Last", format="%.2f"),
                     "1M%":    st.column_config.NumberColumn("1M%",  format="%.2f%%"),
@@ -2397,6 +2492,7 @@ if _active_tab == "🏆 Industry Ranks":
                     height=600,
                     column_config=col_cfg_r,
                 )
+                quality_flags_expander(rk_as_of, "industry")
 
 
 # ── Tab 3 · SCTR ─────────────────────────────────────────────────────────────
@@ -2998,9 +3094,11 @@ if _active_tab == "🌐 Sector Ranks":
                     [c for c in sr_sel_metrics if c in sr_compact.columns] +
                     _sr_deltas
                 ]
+                sr_show = add_quality_flag_column(sr_show, sr_as_of, "sector")
 
                 _sr_pct_fmt = "%.2f%%"
                 sr_col_cfg = {
+                    **FLAG_COL_CFG,
                     "Last": st.column_config.NumberColumn("Last", format="%.2f"),
                     "SCTR": st.column_config.NumberColumn("SCTR", format="%.1f"),
                     **{c: st.column_config.NumberColumn(c, format=_sr_pct_fmt)
@@ -3021,9 +3119,10 @@ if _active_tab == "🌐 Sector Ranks":
                     on_select="rerun",
                     key="sr_rw_sel",
                 )
+                quality_flags_expander(sr_as_of, "sector")
                 if sr_rw_sel.selection.rows:
                     _sr_row = sr_show.iloc[sr_rw_sel.selection.rows[0]]
-                    _sr_sector_name = _sr_row["Name"].rsplit(" Fund", 1)[0]
+                    _sr_sector_name = _strip_count(_sr_row["Name"]).rsplit(" Fund", 1)[0]
                     show_sector_drilldown(
                         _sr_sector_name, sr_as_of, sr_rank_by,
                         sr_window_dates, _sr_bench_ser,
@@ -3068,11 +3167,13 @@ if _active_tab == "🌐 Sector Ranks":
                     )
                     # drop Sector column — redundant at sector level
                     sr_ranks = sr_ranks.drop(columns=["Sector"], errors="ignore")
+                    sr_ranks = add_quality_flag_column(sr_ranks, sr_as_of, "sector")
 
                     _sr_rlbl = _fmt_date(sr_resolved)
                     _sr_vs_price = f"Δ Price% {_sr_rlbl}"
                     sr_date_cols = [_fmt_date(d) for d in [sr_as_of, sr_resolved]]
                     sr_cmp_cfg = {
+                        **FLAG_COL_CFG,
                         "SCTR":   st.column_config.NumberColumn("SCTR", format="%.1f"),
                         "Last":   st.column_config.NumberColumn("Last", format="%.2f"),
                         "1M%":    st.column_config.NumberColumn("1M%",  format="%.2f%%"),
@@ -3103,9 +3204,10 @@ if _active_tab == "🌐 Sector Ranks":
                         on_select="rerun",
                         key="sr_cwd_sel",
                     )
+                    quality_flags_expander(sr_as_of, "sector")
                     if sr_cwd_sel.selection.rows:
                         _sr_row = sr_ranks.iloc[sr_cwd_sel.selection.rows[0]]
-                        _sr_sector_name = _sr_row["Name"].rsplit(" Fund", 1)[0]
+                        _sr_sector_name = _strip_count(_sr_row["Name"]).rsplit(" Fund", 1)[0]
                         show_sector_drilldown(
                             _sr_sector_name, sr_as_of, sr_rank_by,
                             sr_compare_opts, _sr_bench_ser,
