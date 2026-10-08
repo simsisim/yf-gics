@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -21,10 +22,15 @@ from src.down_day_rs import (
     SPREAD_MIN,
 )
 
+# ?industry=<name>&date=<YYYY-MM-DD> opens a standalone full-page drill-down
+# (linked from the Industry Ranks table, opens in a new browser tab).
+_DD_PAGE_INDUSTRY = st.query_params.get("industry")
+
 st.set_page_config(
-    page_title="StockCharts Dashboard",
+    page_title=f"{_DD_PAGE_INDUSTRY} · StockCharts" if _DD_PAGE_INDUSTRY else "StockCharts Dashboard",
     page_icon="📈",
     layout="wide",
+    initial_sidebar_state="collapsed" if _DD_PAGE_INDUSTRY else "auto",
 )
 
 # ── palette (mirrors renderer.py dark theme) ──────────────────────────────────
@@ -1405,6 +1411,64 @@ def _search_filter(df: pd.DataFrame, query: str) -> pd.DataFrame:
     return df[mask]
 
 
+# TradingView's watchlist import takes a .txt of comma-separated symbols,
+# optionally EXCHANGE:SYMBOL and "###Section" headers. StockCharts "$" symbols
+# (industry/index series) have no TradingView equivalent and are dropped.
+_TV_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
+
+
+def tradingview_watchlist_text(
+    df: pd.DataFrame,
+    symbol_col: str = "symbol",
+    section_col: "str | None" = None,
+    exchange_col: "str | None" = None,
+) -> tuple[str, int]:
+    """Return (watchlist text, symbol count) in TradingView import format.
+    Symbols keep table order, deduplicated; section_col groups them under
+    ###headers in first-appearance order."""
+    seen: set[str] = set()
+    sections: dict[str, list[str]] = {}
+    for _, row in df.iterrows():
+        sym = row[symbol_col]
+        if pd.isna(sym) or not str(sym).strip() or str(sym).startswith("$"):
+            continue
+        sym = str(sym).strip()
+        exch = str(row[exchange_col]).upper() if exchange_col and pd.notna(row[exchange_col]) else ""
+        tv = f"{exch}:{sym}" if exch in _TV_EXCHANGES else sym
+        if tv in seen:
+            continue
+        seen.add(tv)
+        sec = str(row[section_col]) if section_col and pd.notna(row[section_col]) else ""
+        sections.setdefault(sec, []).append(tv)
+    parts: list[str] = []
+    for sec, syms in sections.items():
+        if sec:
+            parts.append(f"###{sec.replace(',', ' ')}")
+        parts.extend(syms)
+    return ",".join(parts), len(seen)
+
+
+def tradingview_watchlist_button(
+    df: pd.DataFrame,
+    key: str,
+    file_stem: str,
+    symbol_col: str = "symbol",
+    section_col: "str | None" = None,
+    exchange_col: "str | None" = None,
+) -> None:
+    """Download the table's symbols as a .txt importable into a TradingView
+    watchlist (Watchlist menu → Import list…)."""
+    text, n = tradingview_watchlist_text(df, symbol_col, section_col, exchange_col)
+    st.download_button(
+        f"⬇ Download {n} symbols as TradingView watchlist",
+        data=text,
+        file_name=f"{file_stem}.txt",
+        mime="text/plain",
+        key=key,
+        disabled=not n,
+    )
+
+
 def compute_industry_leaders(
     stock_df: pd.DataFrame,
     industry_sctr: pd.Series,
@@ -1649,24 +1713,26 @@ with st.sidebar:
         st.caption(f"  • {d}")
 
 
-# ── industry drilldown dialog ─────────────────────────────────────────────────
+# ── industry drilldown ────────────────────────────────────────────────────────
+# Rendered inline (full page width) rather than in an st.dialog, whose
+# "large" width is capped at ~750px.
 
-@st.dialog("Industry drill-down", width="large")
-def show_industry_drilldown(
+def industry_page_url(industry_name: str, snapshot_date: str) -> str:
+    """Link to the standalone drill-down page for one industry/date."""
+    query = urlencode({"industry": industry_name, "date": snapshot_date})
+    return f"{st.context.url or ''}?{query}"
+
+
+def render_industry_drilldown(
     industry_name: str,
     snapshot_date: str,
     perf: dict,
     all_dates: tuple[str, ...],
+    show_title: bool = True,
+    bench: "str | None" = None,
 ) -> None:
-    st.markdown("""
-        <style>
-        div[data-testid="stDialog"] > div > div[data-testid="stModalDialogContent"] {
-            max-width: 92vw !important;
-            width: 92vw !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    st.markdown(f"### {industry_name}  ·  {_fmt_date(snapshot_date)}")
+    if show_title:
+        st.markdown(f"### {industry_name}  ·  {_fmt_date(snapshot_date)}")
 
     # ── industry performance bar ──────────────────────────────────────────────
     _perf_labels = [
@@ -1716,11 +1782,15 @@ def show_industry_drilldown(
     display = stocks[base_cols + pct_cols + price_cols]
 
     _pct_cfg = {"format": "%+.2f%%"}
+    st.caption(
+        "ℹ️ vs. Benchmark is not computed for individual stocks — stock % columns are absolute."
+        + (f" (Headline figures above are relative to **{bench}**.)" if bench else "")
+    )
     st.dataframe(
         display,
         use_container_width=True,
         hide_index=True,
-        height=480,
+        height=min(35 * (len(display) + 1) + 3, 800),
         column_config={
             "SCTR":    st.column_config.NumberColumn("SCTR",    format="%.1f"),
             "1D%":     st.column_config.NumberColumn("1D%",     **_pct_cfg),
@@ -1733,6 +1803,10 @@ def show_industry_drilldown(
     )
     st.caption(f"{len(stocks)} stocks · sorted by SCTR descending"
                + (" · 1W%/1M% approximated from snapshot closes" if "1W%" in pct_cols else ""))
+    tradingview_watchlist_button(
+        display, key="ind_dd_wl_dl", symbol_col="Symbol",
+        file_stem=f"{industry_name}_{snapshot_date}".replace(" ", "_").replace("/", "-"),
+    )
 
 
 @st.dialog("Sector drill-down", width="large")
@@ -1823,6 +1897,28 @@ def show_sector_drilldown(
             height=min(480, 40 + n_industries * 38),
             column_config=_ind_col_cfg,
         )
+
+
+# ── standalone industry drill-down page ───────────────────────────────────────
+# Headline perf here is absolute; the in-tab panel shows benchmark-relative
+# values when a benchmark is selected.
+
+if _DD_PAGE_INDUSTRY:
+    _dd_date = st.query_params.get("date") or (dates_ind[0] if dates_ind else "")
+    if st.button("← Back to dashboard"):
+        st.query_params.clear()
+        st.rerun()
+    _dd_rows = load_industry(_dd_date) if _dd_date in dates_ind else pd.DataFrame()
+    _dd_rows = _dd_rows[_dd_rows["name"] == _DD_PAGE_INDUSTRY] if not _dd_rows.empty else _dd_rows
+    if _dd_rows.empty:
+        st.error(f"No industry named “{_DD_PAGE_INDUSTRY}” on {_dd_date or 'any date'}.")
+    else:
+        _r = _dd_rows.iloc[0]
+        _src = {"SCTR": "sctr", "1D%": "pct_1d", "1W%": "pct_1w", "1M%": "pct_1m",
+                "3M%": "pct_3m", "6M%": "pct_6m", "1Y%": "pct_1y", "YTD%": "pct_ytd"}
+        perf = {k: _r[c] for k, c in _src.items() if c in _r.index}
+        render_industry_drilldown(_DD_PAGE_INDUSTRY, _dd_date, perf, tuple(dates_ind))
+    st.stop()
 
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
@@ -2099,23 +2195,54 @@ if _active_tab == "🏆 Industry Ranks":
                 st.caption(f"Price % columns adjusted relative to **{rk_bench}**. SCTR unchanged. Click a row to drill down.{_rk_search_note}")
             else:
                 st.caption(f"Click a row to drill down into its stocks.{_rk_search_note}")
-            sel = st.dataframe(
-                display_df,
+            # Row selection is positional, so the open drill-down is tracked by
+            # industry name (rk_dd_industry). The table key includes the row
+            # order, so any filter/date/sort change starts a fresh, empty
+            # selection instead of silently pointing at a different industry.
+            _rk_names = tuple(display_df["Name"].map(_strip_count))
+            _rk_tbl_key = f"rk_table_sel_{st.session_state.get('rk_sel_gen', 0)}_{hash(_rk_names)}"
+
+            def _rk_on_select(key=_rk_tbl_key, names=_rk_names):
+                rows = st.session_state[key].selection.rows
+                st.session_state.rk_dd_industry = names[rows[0]] if rows else None
+
+            def _rk_close_drilldown():
+                st.session_state.rk_dd_industry = None
+                st.session_state.rk_sel_gen = st.session_state.get("rk_sel_gen", 0) + 1
+
+            _rk_table = display_df.assign(
+                **{"↗": [industry_page_url(n, rk_as_of) for n in _rk_names]}
+            )
+            _rk_table = _rk_table[["↗"] + list(display_df.columns)]
+            col_cfg["↗"] = st.column_config.LinkColumn(
+                "↗", display_text="↗", width="small",
+                help="Open this industry's drill-down in a new browser tab",
+            )
+            st.dataframe(
+                _rk_table,
                 use_container_width=True,
                 height=600,
                 column_config=col_cfg,
                 selection_mode="single-row",
-                on_select="rerun",
-                key="rk_table_sel",
+                on_select=_rk_on_select,
+                key=_rk_tbl_key,
             )
-            selected_rows = sel.selection.rows
-            if selected_rows:
-                row_idx = selected_rows[0]
-                _row = display_df.iloc[row_idx]
-                industry_name = _strip_count(_row["Name"])
+
+            _dd_name = st.session_state.get("rk_dd_industry")
+            if _dd_name in _rk_names:
+                _row = display_df.iloc[_rk_names.index(_dd_name)]
                 _perf_keys = ["SCTR", "1D%", "1W%", "1M%", "3M%", "6M%", "1Y%", "YTD%"]
                 perf = {k: _row[k] for k in _perf_keys if k in display_df.columns}
-                show_industry_drilldown(industry_name, rk_as_of, perf, tuple(dates_ind))
+                with st.container(border=True):
+                    _dd_t, _dd_o, _dd_x = st.columns([7, 1.5, 1])
+                    _dd_t.markdown(f"### {_dd_name}  ·  {_fmt_date(rk_as_of)}")
+                    _dd_o.link_button("↗ Open in new tab", industry_page_url(_dd_name, rk_as_of),
+                                      use_container_width=True)
+                    _dd_x.button("✕ Close", key="rk_dd_close", on_click=_rk_close_drilldown,
+                                 use_container_width=True)
+                    render_industry_drilldown(_dd_name, rk_as_of, perf, tuple(dates_ind),
+                                              show_title=False,
+                                              bench=rk_bench if _rk_bench_ser is not None else None)
 
     # ── Compare with date ─────────────────────────────────────────────────────
     else:
@@ -2261,17 +2388,7 @@ if _active_tab == "⚡ SCTR":
         )
 
         def _sctr_watchlist_button(df: pd.DataFrame, key: str) -> None:
-            """Download the table's symbols as a comma-separated list — importable
-            directly into a TradingView watchlist for chart-by-chart follow-up."""
-            symbols = df["symbol"].dropna().tolist()
-            st.download_button(
-                f"⬇ Download {len(symbols)} symbols as TradingView watchlist",
-                data=",".join(symbols),
-                file_name=f"sctr_watchlist_{sctr_date}.txt",
-                mime="text/plain",
-                key=key,
-                disabled=not symbols,
-            )
+            tradingview_watchlist_button(df, key, f"sctr_watchlist_{sctr_date}")
 
         # ── Rolling window ────────────────────────────────────────────────────
         if sc_view == "Rolling window":
@@ -2594,6 +2711,9 @@ if _active_tab == "🔥 Leaders Heatmap":
                     "pct_1m":    st.column_config.NumberColumn("1M %",   format="%+.2f%%"),
                     "pct_3m":    st.column_config.NumberColumn("3M %",   format="%+.2f%%"),
                 },
+            )
+            tradingview_watchlist_button(
+                hm_df[tbl_cols], key="hm_wl_dl", file_stem=f"leaders_heatmap_{selected_date}",
             )
 
 
@@ -3108,6 +3228,17 @@ if _active_tab == "🔍 Industry Leaders":
                 "Industry SCTR": st.column_config.NumberColumn("Industry SCTR", format="%.1f"),
                 "Gap":           st.column_config.NumberColumn("Gap", format="%+.1f"),
             },
+        )
+        _il_wl = [
+            {"Industry": r["Industry"], "symbol": entry.split()[0]}
+            for _, r in display.iterrows()
+            for col in ("Large (top N)", "Mid (top N)", "Small (top N)")
+            if isinstance(r.get(col), str)
+            for entry in r[col].split(", ") if entry.strip()
+        ]
+        tradingview_watchlist_button(
+            pd.DataFrame(_il_wl, columns=["Industry", "symbol"]), key="il_wl_dl",
+            file_stem=f"industry_leaders_{selected_date}", section_col="Industry",
         )
         st.caption(
             "Gap = best individual stock's SCTR in that industry − the industry's own "
