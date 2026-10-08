@@ -521,6 +521,45 @@ KEY_RANK_BY_MAP = {
 }
 
 
+# ── 52-week new highs / lows ──────────────────────────────────────────────────
+
+@st.cache_data(ttl=300)
+def available_dates_nhl() -> list[str]:
+    with sqlite3.connect(DB_PATH) as c:
+        try:
+            return [r[0] for r in c.execute(
+                "SELECT DISTINCT snapshot_date FROM new_highs_lows ORDER BY snapshot_date DESC"
+            ).fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
+
+@st.cache_data(ttl=300)
+def load_date_nhl(snapshot_date: str) -> pd.DataFrame:
+    with sqlite3.connect(DB_PATH) as c:
+        return pd.read_sql_query(
+            "SELECT * FROM new_highs_lows WHERE snapshot_date=? ORDER BY direction, sctr DESC",
+            c, params=(snapshot_date,),
+        )
+
+
+@st.cache_data(ttl=300)
+def load_nhl_counts() -> pd.DataFrame:
+    """Daily count of new highs/lows per category — feeds the breadth trend chart."""
+    with sqlite3.connect(DB_PATH) as c:
+        try:
+            return pd.read_sql_query(
+                """SELECT snapshot_date, category, direction, COUNT(*) AS n
+                   FROM new_highs_lows
+                   GROUP BY snapshot_date, category, direction
+                   ORDER BY snapshot_date""",
+                c,
+            )
+        except sqlite3.OperationalError:
+            return pd.DataFrame()
+
+
+
 @st.cache_data(ttl=300)
 def load_industry_stocks(
     industry_name: str,
@@ -844,6 +883,36 @@ def build_theme_diverging_chart(df: pd.DataFrame, pct_col: str) -> go.Figure:
     return fig
 
 
+
+
+def build_nhl_trend_chart(counts: pd.DataFrame) -> go.Figure:
+    """Daily new-highs (up, green) vs new-lows (down, red) bar chart — classic breadth view."""
+    by_date = counts.groupby(["snapshot_date", "direction"])["n"].sum().unstack(fill_value=0)
+    for col in ("high", "low"):
+        if col not in by_date.columns:
+            by_date[col] = 0
+    by_date = by_date.sort_index()
+
+    fig = go.Figure()
+    fig.add_bar(
+        x=by_date.index, y=by_date["high"], name="New Highs",
+        marker_color=_GREEN, hovertemplate="%{x}<br>New Highs: %{y}<extra></extra>",
+    )
+    fig.add_bar(
+        x=by_date.index, y=-by_date["low"], name="New Lows",
+        marker_color=_RED, hovertemplate="%{x}<br>New Lows: %{customdata}<extra></extra>",
+        customdata=by_date["low"],
+    )
+    _base_layout(fig, height=360)
+    fig.update_layout(
+        barmode="relative",
+        yaxis_title="Count",
+        bargap=0.25,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(tickfont=dict(color=_DIM, size=9), gridcolor=_BORDER)
+    fig.update_yaxes(tickformat="d", gridcolor=_BORDER, zerolinecolor=_BORDER, zerolinewidth=1.5)
+    return fig
 
 
 def _fmt_date(d: str) -> str:
@@ -1400,6 +1469,15 @@ _INDUSTRY_ALIAS = {
 }
 
 
+def _sector_filter_values(sectors_sel: list[str]) -> set[str]:
+    """sectors_sel (sidebar, from industry_summary.sector, e.g. 'Technology Sector')
+    doesn't match the bare sector naming used by sctr_rankings/new_highs_lows.sector
+    ('Technology') — include both forms so isin() works against either table."""
+    values = set(sectors_sel)
+    values |= {s.replace(" Sector", "").strip() for s in sectors_sel}
+    return values
+
+
 def _search_filter(df: pd.DataFrame, query: str) -> pd.DataFrame:
     """Case-insensitive substring filter across every column's string form."""
     q = query.strip().lower()
@@ -1412,8 +1490,9 @@ def _search_filter(df: pd.DataFrame, query: str) -> pd.DataFrame:
 
 
 # TradingView's watchlist import takes a .txt of comma-separated symbols,
-# optionally EXCHANGE:SYMBOL and "###Section" headers. StockCharts "$" symbols
-# (industry/index series) have no TradingView equivalent and are dropped.
+# optionally EXCHANGE:SYMBOL and "###Section" headers. "^" symbols (Yahoo
+# ^YH industry indexes) and StockCharts "$" symbols have no TradingView
+# equivalent and are dropped.
 _TV_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
 
 
@@ -1430,7 +1509,7 @@ def tradingview_watchlist_text(
     sections: dict[str, list[str]] = {}
     for _, row in df.iterrows():
         sym = row[symbol_col]
-        if pd.isna(sym) or not str(sym).strip() or str(sym).startswith("$"):
+        if pd.isna(sym) or not str(sym).strip() or str(sym).startswith(("$", "^")):
             continue
         sym = str(sym).strip()
         exch = str(row[exchange_col]).upper() if exchange_col and pd.notna(row[exchange_col]) else ""
@@ -1937,6 +2016,7 @@ _TAB_LABELS = [
     "🔥 Leaders Heatmap",
     "🔄 Rotation Radar",
     "🔍 Industry Leaders",
+    "📈 52W Highs/Lows",
     "🛡️ Down-Day RS",
 ]
 if "active_tab" not in st.session_state:
@@ -2595,6 +2675,9 @@ if _active_tab == "🔥 Leaders Heatmap":
         "Large + Mid":         ("large", "mid"),
         "Large + Mid + Small": ("large", "mid", "small"),
     }
+    # only offer groups that have data (no 'etf' rows until ETF SCTR is computed)
+    _have_groups = set(available_sctr_groups())
+    _GROUP_MAP = {k: v for k, v in _GROUP_MAP.items() if set(v) <= _have_groups}
     _COLOR_MAP = {
         "1D % Change":      "pct_1d",
         "1W % Change":      "pct_1w",
@@ -3245,6 +3328,98 @@ if _active_tab == "🔍 Industry Leaders":
             "aggregate SCTR (same number shown in Industry Ranks). A large positive gap "
             "means a stock is running well ahead of what the industry-level number suggests."
         )
+
+
+# ── 52W Highs/Lows ────────────────────────────────────────────────────────────
+
+if _active_tab == "📈 52W Highs/Lows":
+    st.caption(
+        "Stocks and ^YH industry indexes that set a new 52-week high or low on a given "
+        "session, computed from local daily OHLCV."
+    )
+
+    nhl_dates = available_dates_nhl()
+
+    if not nhl_dates:
+        st.info("No new-highs/lows data yet — the `new_highs_lows` table is not populated "
+                "in `data/yf_dashboard.db`.")
+    else:
+        c1, c2, c3, c4 = st.columns([1.3, 1, 1, 2])
+        with c1:
+            nhl_date = st.selectbox("Snapshot date", nhl_dates, key="nhl_date")
+        with c2:
+            nhl_direction = st.radio("Direction", ["All", "Highs", "Lows"], horizontal=True, key="nhl_direction")
+        with c3:
+            nhl_category = st.radio("Category", ["All", "Stocks", "ETFs", "Industries"], horizontal=True, key="nhl_category")
+        with c4:
+            nhl_search = st.text_input(
+                "Search", key="nhl_search",
+                placeholder="Filter rows — symbol, name, sector, industry",
+            )
+
+        nhl_day = load_date_nhl(nhl_date)
+
+        n_highs = int((nhl_day["direction"] == "high").sum())
+        n_lows = int((nhl_day["direction"] == "low").sum())
+        n_ind_highs = int(((nhl_day["direction"] == "high") & (nhl_day["category"] == "industry")).sum())
+        n_ind_lows = int(((nhl_day["direction"] == "low") & (nhl_day["category"] == "industry")).sum())
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("New Highs", n_highs)
+        m2.metric("New Lows", n_lows)
+        m3.metric("Net (Highs − Lows)", n_highs - n_lows)
+        m4.metric("Industries at Extreme", n_ind_highs + n_ind_lows, help="^YH industry indexes at a new 52w high or low")
+
+        _DIRECTION_MAP = {"Highs": "high", "Lows": "low"}
+        _CATEGORY_MAP = {"Stocks": "stock", "ETFs": "etf", "Industries": "industry"}
+
+        display = nhl_day.copy()
+        if nhl_direction in _DIRECTION_MAP:
+            display = display[display["direction"] == _DIRECTION_MAP[nhl_direction]]
+        if nhl_category in _CATEGORY_MAP:
+            display = display[display["category"] == _CATEGORY_MAP[nhl_category]]
+        if sectors_sel:
+            display = display[display["sector"].isin(_sector_filter_values(sectors_sel)) | display["sector"].isna()]
+
+        n_before = len(display)
+        display = _search_filter(display, nhl_search)
+        _search_note = f" · {len(display)} match \"{nhl_search}\"" if nhl_search.strip() else ""
+        st.caption(f"{n_before} rows · {nhl_date}{_search_note}")
+
+        show_cols = ["symbol", "name", "exchange", "sector", "industry",
+                     "last", "volume", "sctr", "cap_tier", "category", "direction"]
+        text_cols = ["name", "exchange", "sector", "industry", "cap_tier"]
+        nhl_table = display[[c for c in show_cols if c in display.columns]].copy()
+        nhl_table[text_cols] = nhl_table[text_cols].fillna("")
+        nhl_table = nhl_table.sort_values(["direction", "sctr"], ascending=[True, False])
+        st.dataframe(
+            nhl_table.reset_index(drop=True),
+            use_container_width=True,
+            hide_index=True,
+            height=min(600, 40 + len(display) * 35 + 40),
+            column_config={
+                "last":   st.column_config.NumberColumn("Last", format="%.2f"),
+                "volume": st.column_config.NumberColumn("Volume", format="%d"),
+                "sctr":   st.column_config.NumberColumn("SCTR", format="%.1f"),
+            },
+        )
+        tradingview_watchlist_button(
+            nhl_table.assign(_section=nhl_table["direction"].map({"high": "52W Highs", "low": "52W Lows"})),
+            key="nhl_wl_dl", file_stem=f"52w_highs_lows_{nhl_date}",
+            section_col="_section", exchange_col="exchange",
+        )
+
+        st.divider()
+        st.subheader("Trend")
+        nhl_counts = load_nhl_counts()
+        if nhl_counts.empty:
+            st.info("Not enough history yet to plot a trend — check back after a few daily runs.")
+        else:
+            st.plotly_chart(build_nhl_trend_chart(nhl_counts), use_container_width=True)
+            st.caption(
+                f"{len(nhl_counts['snapshot_date'].unique())} session(s) of history · "
+                "bars above zero = new highs, below zero = new lows (stocks + industries combined)"
+            )
 
 
 # ── Tab 8 · Down-Day RS ───────────────────────────────────────────────────────

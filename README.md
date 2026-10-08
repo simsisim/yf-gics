@@ -25,7 +25,9 @@ All outputs land in `results/` as timestamped CSVs and Markdown reports. A Strea
 ```
 yf-gics/
 ├── main.py                    # CLI entry point — all modes
-├── app.py                     # Streamlit dashboard (5 tabs)
+├── app.py                     # Streamlit dashboard (stockCharts port, reads data/yf_dashboard.db)
+├── app_legacy.py              # previous 5-tab dashboard (Overview / Industries / Stage Map / Stocks / Signal Delta)
+├── input/key_indices.csv      # Key Index Ranks universe (symbol, name, category)
 ├── config.py                  # Paths and constants
 ├── industries.csv             # 143 GICS industry groups
 ├── stocks_by_industry.csv     # ~5,200 stocks mapped to industries
@@ -141,7 +143,22 @@ python main.py --mode stock-screener --top-industries-only --min-score 4
 streamlit run app.py
 ```
 
-Five tabs: **Overview** (market clock, breadth gauge, sector health) · **Industries** (filterable severity table) · **Stage Map** (distribution charts, Minervini heatmap) · **Stocks** (scatter + ranked table) · **Signal Delta** (upgrades/downgrades/crossings)
+Same layout and functionality as the stockCharts dashboard, but every number is computed locally (from ^YH indexes and stock OHLCV) instead of downloaded from StockCharts. Reads `data/yf_dashboard.db`.
+
+| Tab | Reads | Description |
+|-----|-------|-------------|
+| **Key Index Ranks** | `key_indices` | Macro indices + size/style/bond ETFs (`input/key_indices.csv`) ranked by 1D–1Y / YTD price %, no SCTR |
+| **Sector Ranks** | `sector_summary` | Sector rank table with rank-change columns; click a row for its industries |
+| **Industry Ranks** | `industry_summary` | Industry rank table; click a row for an inline stock drill-down, or "↗" to open it as its own page (`?industry=<name>&date=<YYYY-MM-DD>`) |
+| **SCTR** | `sctr_rankings` | Stock SCTR ranking by cap group and date |
+| **Visual Tracker** | `industry_summary` | Industry % change bar chart for any timeframe |
+| **Leaders Heatmap** | `sctr_rankings` | Treemap of high-SCTR stocks sized by market cap or volume |
+| **Rotation Radar** | `sctr_rankings` | Per-industry breadth of SCTR movers over a lookback window |
+| **Industry Leaders** | `sctr_rankings` | Industries whose best stock's SCTR runs furthest ahead of the industry's own |
+| **52W Highs/Lows** | `new_highs_lows` | Stocks and industry indexes at a new 52-week high/low, plus a daily count trend |
+| **🛡️ Down-Day RS** | `sctr_rankings` | Down-capture vs ^GSPC on the days the market falls |
+
+Tabs whose table is not populated yet show an empty-state note. Stock tables offer a TradingView watchlist download (`.txt`, Watchlist → Import list…). The previous 5-tab dashboard is kept as `app_legacy.py`.
 
 ---
 
