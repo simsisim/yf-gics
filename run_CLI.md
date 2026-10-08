@@ -60,7 +60,15 @@ python main.py --mode closing-range --correction-start 2026-06-12 --correction-e
 # Stock screener options
 python main.py --mode stock-screener --top-industries-only   # only STRONG BUY / BUY industries
 python main.py --mode stock-screener --min-score 4           # min closing range score
+
+# Down-day relative strength — down-capture vs SPY on the days the market falls
+python main.py --mode down-day-rs                            # trailing 21/42/63d windows + auto correction window
+python main.py --mode down-day-rs --min-score 3              # min signal_count 0-4 (default 3)
+python main.py --mode down-day-rs --top-industries-only      # only STRONG BUY / BUY industries
+python main.py --mode down-day-rs --correction-start 2026-06-12 --correction-end 2026-06-26
 ```
+
+Also surfaced in the dashboard as the **🛡️ Down-Day RS** tab (close-to-close, ^GSPC benchmark).
 
 ---
 

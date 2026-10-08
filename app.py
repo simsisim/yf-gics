@@ -12,6 +12,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.down_day_rs import (
+    down_day_metrics,
+    blend_rank,
+    DOWN_CAPTURE_MAX,
+    DOWN_WINRATE_MIN,
+    SPREAD_MIN,
+)
+
 st.set_page_config(
     page_title="StockCharts Dashboard",
     page_icon="📈",
@@ -1133,6 +1141,83 @@ def compute_nday_pct(
     return merged
 
 
+@st.cache_data(ttl=300)
+def load_sctr_close_panel(groups: tuple[str, ...]) -> pd.DataFrame:
+    """Per-stock close / sector / industry / market_cap across every snapshot,
+    for the down-day RS tab. One row per (snapshot_date, symbol)."""
+    ph = ",".join("?" * len(groups))
+    with sqlite3.connect(DB_PATH) as c:
+        df = pd.read_sql_query(
+            f"""SELECT snapshot_date, symbol, sector, industry, close, market_cap
+                FROM sctr_rankings WHERE group_name IN ({ph})""",
+            c, params=groups,
+        )
+    return df.drop_duplicates(["snapshot_date", "symbol"], keep="first")
+
+
+def compute_down_day_rs(
+    panel: pd.DataFrame,
+    bench: pd.DataFrame,
+    as_of: str,
+    window: int,
+    down_threshold: float = 0.0,
+) -> "tuple[pd.DataFrame | None, str | None, int]":
+    """
+    Close-to-close down-day relative strength vs ^GSPC over the trailing
+    `window` snapshots, using the same metric + rank definition as the CLI
+    screener (src.down_day_rs).
+
+    Returns (ranked_df, last_date, n_down_days_bench).
+    """
+    dates = sorted(d for d in panel["snapshot_date"].unique() if d <= as_of)
+    if len(dates) < 12:
+        return None, None, 0
+    dates = dates[-(window + 1):]
+
+    b = (bench[bench["snapshot_date"].isin(dates)]
+         .sort_values("snapshot_date").set_index("snapshot_date")["close"])
+    b_ret = (b.pct_change(fill_method=None) * 100).dropna()
+    if len(b_ret) < 10:
+        return None, None, 0
+    n_down_bench = int((b_ret < down_threshold).sum())
+
+    win = panel[panel["snapshot_date"].isin(dates)]
+    meta = (win[win["snapshot_date"] == dates[-1]][["symbol", "sector", "industry", "market_cap"]]
+            .drop_duplicates("symbol").set_index("symbol"))
+    wide = win.pivot_table(index="snapshot_date", columns="symbol", values="close")
+
+    min_obs = max(10, int(len(b_ret) * 0.7))
+    rows = []
+    for sym in wide.columns:
+        s_ret = (wide[sym].pct_change(fill_method=None) * 100).dropna()
+        if len(s_ret) < min_obs:
+            continue
+        m = down_day_metrics(s_ret, b_ret, down_threshold)
+        if m is None:
+            continue
+        info = meta.loc[sym] if sym in meta.index else None
+        rows.append({
+            "symbol": sym,
+            "sector": (info["sector"] if info is not None else "") or "",
+            "industry": (info["industry"] if info is not None else "") or "",
+            "market_cap": float(info["market_cap"]) if info is not None and pd.notna(info["market_cap"]) else float("nan"),
+            **m,
+        })
+    if not rows:
+        return None, None, n_down_bench
+
+    df = pd.DataFrame(rows)
+    df["down_day_rank"] = blend_rank(df["down_alpha"], df["down_capture"], df["capture_spread"])
+    df["ddr_in_industry"] = (
+        df.groupby("industry", group_keys=False)[["down_alpha", "down_capture", "capture_spread"]]
+          .apply(lambda g: blend_rank(g["down_alpha"], g["down_capture"], g["capture_spread"])
+                 if len(g) >= 3 else pd.Series(float("nan"), index=g.index))
+    )
+    df = df.sort_values("down_day_rank", ascending=False).reset_index(drop=True)
+    df.insert(0, "rank", df.index + 1)
+    return df, dates[-1], n_down_bench
+
+
 def compute_rotation_radar(
     all_df: pd.DataFrame,
     as_of: str,
@@ -1660,7 +1745,8 @@ def show_sector_drilldown(
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
 
-tab_sector, tab_ranks, tab_sctr, tab_theme, tab_heatmap, tab_rotation, tab_leaders = st.tabs([
+(tab_sector, tab_ranks, tab_sctr, tab_theme, tab_heatmap, tab_rotation,
+ tab_leaders, tab_downday) = st.tabs([
     "🌐 Sector Ranks",
     "🏆 Industry Ranks",
     "⚡ SCTR",
@@ -1668,6 +1754,7 @@ tab_sector, tab_ranks, tab_sctr, tab_theme, tab_heatmap, tab_rotation, tab_leade
     "🔥 Leaders Heatmap",
     "🔄 Rotation Radar",
     "🔍 Industry Leaders",
+    "🛡️ Down-Day RS",
 ])
 
 
@@ -2775,6 +2862,137 @@ with tab_leaders:
             "Gap = best individual stock's SCTR in that industry − the industry's own "
             "aggregate SCTR (same number shown in Industry Ranks). A large positive gap "
             "means a stock is running well ahead of what the industry-level number suggests."
+        )
+
+
+# ── Tab 8 · Down-Day RS ───────────────────────────────────────────────────────
+
+with tab_downday:
+    st.caption(
+        "Which stocks show relative strength **specifically on the days the S&P falls** — "
+        "close-to-close down-capture vs ^GSPC over the trailing window. "
+        "`down_capture` < 1 = cushioned · ≤ 0 = rose while the market fell."
+    )
+
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 3])
+    with c1:
+        dd_window = st.selectbox("Window (snapshots)", [20, 30, 40, 60], index=2, key="dd_window")
+    with c2:
+        dd_thr_label = st.selectbox(
+            "Down day =", ["S&P < 0%", "S&P < −0.5%", "S&P < −1%"], key="dd_thr",
+        )
+        dd_threshold = {"S&P < 0%": 0.0, "S&P < −0.5%": -0.5, "S&P < −1%": -1.0}[dd_thr_label]
+    with c3:
+        dd_min_down = st.number_input("Min down days", 3, 30, 6, key="dd_min_down")
+    with c4:
+        dd_search = st.text_input(
+            "Search", key="dd_search", placeholder="Filter — ticker, sector or industry",
+        )
+
+    dd_panel = load_sctr_close_panel(("large", "mid", "small"))
+    dd_bench = load_benchmark_series("^GSPC")
+
+    dd_df, dd_last, dd_n_down = compute_down_day_rs(
+        dd_panel, dd_bench, selected_date, int(dd_window), dd_threshold,
+    )
+
+    if dd_df is None:
+        st.warning(
+            "Not enough snapshot history for this window / benchmark. "
+            "The DB needs ~12+ daily snapshots before the S&P cutoff."
+        )
+    else:
+        if sectors_sel:
+            normalized = {s.replace(" Sector", "") for s in sectors_sel}
+            dd_df = dd_df[dd_df["sector"].isin(normalized)]
+        dd_df = dd_df[dd_df["n_down_days"] >= int(dd_min_down)].copy()
+
+        st.caption(
+            f"{len(dd_df)} stocks · window ends **{dd_last}** · "
+            f"{dd_n_down} S&P down days ({dd_thr_label}) in the last {int(dd_window)} snapshots · "
+            f"rank = 0.50·down-alpha + 0.30·(inv. down-capture) + 0.20·(up/down spread), percentile 0–99"
+        )
+
+        # ── quadrant scatter: up-capture (x) vs down-capture (y) ──────────────
+        LIM = 2.5
+        plot_df = dd_df.copy()
+        n_off = int((plot_df["up_capture"].abs() > LIM).sum() + (plot_df["down_capture"].abs() > LIM).sum())
+        plot_df["x"] = plot_df["up_capture"].clip(-LIM, LIM)
+        plot_df["y"] = plot_df["down_capture"].clip(-LIM, LIM)
+
+        fig = go.Figure(go.Scatter(
+            x=plot_df["x"], y=plot_df["y"],
+            mode="markers",
+            marker=dict(
+                size=7,
+                color=plot_df["down_day_rank"],
+                colorscale="Viridis",
+                cmin=0, cmax=99,
+                colorbar=dict(title="DDR", tickfont=dict(size=9)),
+                line=dict(width=0.5, color=_BORDER),
+            ),
+            customdata=plot_df[["symbol", "sector", "industry", "down_capture",
+                                "up_capture", "capture_spread", "down_winrate",
+                                "down_alpha", "down_day_rank"]].values,
+            hovertemplate=(
+                "<b>%{customdata[0]}</b> — %{customdata[2]}<br>"
+                "down-capture: %{customdata[3]:.2f}   up-capture: %{customdata[4]:.2f}<br>"
+                "spread: %{customdata[5]:.2f}   down-day win: %{customdata[6]:.0%}<br>"
+                "down-alpha: %{customdata[7]:+.2f} %/day   DDR: %{customdata[8]:.0f}"
+                "<extra></extra>"
+            ),
+        ))
+        fig.add_hline(y=1.0, line=dict(color=_DIM, width=1, dash="dot"))
+        fig.add_hline(y=0.0, line=dict(color=_BORDER, width=1))
+        fig.add_vline(x=1.0, line=dict(color=_DIM, width=1, dash="dot"))
+        fig.add_annotation(x=-LIM, y=-LIM, xanchor="left", yanchor="bottom", showarrow=False,
+                           text="↙ rose on red days, lagged rallies", font=dict(color=_DIM, size=9))
+        fig.add_annotation(x=LIM, y=-LIM, xanchor="right", yanchor="bottom", showarrow=False,
+                           text="ideal: full rallies, up on red days ↘", font=dict(color=_GREEN, size=9))
+        _base_layout(fig, height=460)
+        fig.update_layout(
+            xaxis=dict(title="up-capture (share of S&P up-day moves)", gridcolor=_BORDER,
+                       zerolinecolor=_BORDER, tickfont=dict(color=_DIM, size=9), range=[-LIM, LIM]),
+            yaxis=dict(title="down-capture (share of S&P down-day moves)", gridcolor=_BORDER,
+                       zerolinecolor=_BORDER, tickfont=dict(color=_DIM, size=9), range=[LIM, -LIM]),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        if n_off:
+            st.caption(f"↳ {n_off} extreme capture value(s) clipped to the axis edge for display.")
+
+        # ── table ────────────────────────────────────────────────────────────
+        show = dd_df.rename(columns={
+            "rank": "#", "symbol": "Ticker", "sector": "Sector", "industry": "Industry",
+            "down_day_rank": "DDR", "ddr_in_industry": "Ind DDR", "signal_count": "Sig",
+            "down_capture": "DownCap", "up_capture": "UpCap", "capture_spread": "Spread",
+            "down_winrate": "Dn Win", "down_green": "Dn Green", "down_alpha": "Dn Alpha",
+            "n_down_days": "Dn Days",
+        })
+        show["Dn Win"] = show["Dn Win"] * 100
+        show["Dn Green"] = show["Dn Green"] * 100
+        show = _search_filter(show, dd_search)
+        cols = ["#", "Ticker", "Sector", "Industry", "DDR", "Ind DDR", "Sig",
+                "DownCap", "UpCap", "Spread", "Dn Alpha", "Dn Win", "Dn Green", "Dn Days"]
+        st.dataframe(
+            show[cols].reset_index(drop=True),
+            use_container_width=True, height=560,
+            column_config={
+                "DDR":      st.column_config.NumberColumn(format="%.1f"),
+                "Ind DDR":  st.column_config.NumberColumn(format="%.1f"),
+                "DownCap":  st.column_config.NumberColumn(format="%.2f"),
+                "UpCap":    st.column_config.NumberColumn(format="%.2f"),
+                "Spread":   st.column_config.NumberColumn(format="%.2f"),
+                "Dn Alpha": st.column_config.NumberColumn(format="%+.2f"),
+                "Dn Win":   st.column_config.NumberColumn(format="%.0f%%"),
+                "Dn Green": st.column_config.NumberColumn(format="%.0f%%"),
+            },
+        )
+        st.caption(
+            f"**DownCap** = stock's mean return on S&P-down days ÷ S&P's mean return on those days. "
+            f"**Spread** = up-capture − down-capture. **Sig** (0–4): down_capture < {DOWN_CAPTURE_MAX}, "
+            f"down_capture ≤ 0, down-day win-rate ≥ {DOWN_WINRATE_MIN:.0%}, spread ≥ {SPREAD_MIN}. "
+            "Close-to-close only (no intraday) — pair with the CLI `down-day-rs` report for the "
+            "OHLC-based closing-range view."
         )
 
 

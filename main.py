@@ -11,6 +11,7 @@ Usage:
     python main.py --mode stocks   --date 2025-06-01
 
     python main.py --mode validate          # compare industry SCTR vs scraped StockCharts
+    python main.py --mode down-day-rs       # down-day relative strength (down-capture vs SPY)
     python main.py --mode perf              # 1w/2w/1m/3m/6m return + RS + relret vs SPY & QQQ
                                              #   (industries, sector SPDR ETFs, SPY/QQQ reference rows)
     python main.py --mode history-backfill  # rebuild trailing 6mo daily SCTR/Stage/RS/perf history
@@ -39,6 +40,7 @@ import src.market_clock          as market_clock
 import src.rs_percentile         as rs_percentile
 import src.stage_analysis        as stage_analysis
 import src.closing_range         as closing_range
+import src.down_day_rs            as down_day_rs
 import src.breadth               as breadth
 import src.signal_delta          as signal_delta
 import src.stock_screener        as stock_screener
@@ -286,6 +288,7 @@ def main() -> None:
                             'stock-sctr',      # stock SCTR (large/mid/small)
                             'stock-screener',  # ranked stocks within top industries
                             'closing-range',   # IBD correction leader filter
+                            'down-day-rs',     # down-day relative strength (down-capture vs SPY)
                             # ── research / legacy ────────────────────────────
                             'correction',      # legacy correction filter
                             'validate',        # compare vs StockCharts scraped data
@@ -413,6 +416,37 @@ def main() -> None:
         else:
             csv_path, md_path = closing_range.save(cr_df, cfg, c_start, c_end, as_of=as_of)
             closing_range.print_report(cr_df, c_start, c_end)
+            print(f"\nCSV → {csv_path}")
+            print(f"MD  → {md_path}")
+    elif args.mode == 'down-day-rs':
+        logger.info("=== Down-Day Relative Strength (down-capture vs SPY) ===")
+        corr_start_arg = parse_date(args.correction_start)
+        corr_end_arg   = parse_date(args.correction_end)
+
+        ind_filter: list[str] | None = None
+        if args.top_industries_only:
+            label = str(as_of) if as_of else None
+            mom_path = (cfg.results_dir / f"momentum_screen_{label}.csv") if label else \
+                       down_day_rs._latest_file(cfg.results_dir, "momentum_screen_*.csv")
+            if mom_path and mom_path.exists():
+                mom = pd.read_csv(mom_path)
+                ind_filter = mom.loc[
+                    mom['faber_signal'].isin(['STRONG BUY', 'BUY']), 'industry_key'
+                ].tolist()
+                logger.info(f"Top-industries-only: {len(ind_filter)} STRONG BUY/BUY industries")
+
+        ddr_df, d_start, d_end = down_day_rs.run(
+            cfg, as_of=as_of,
+            correction_start=corr_start_arg,
+            correction_end=corr_end_arg,
+            industry_keys=ind_filter,
+            min_signals=min(args.min_score, 4),
+        )
+        if ddr_df.empty:
+            logger.warning("No down-day RS results — try --min-score 1 or a wider correction window")
+        else:
+            csv_path, md_path = down_day_rs.save(ddr_df, cfg, d_start, d_end, as_of=as_of)
+            down_day_rs.print_report(ddr_df, d_start, d_end)
             print(f"\nCSV → {csv_path}")
             print(f"MD  → {md_path}")
     elif args.mode == 'market-clock':

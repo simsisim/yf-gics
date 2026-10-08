@@ -122,6 +122,7 @@ python main.py --mode stocks      # all stock steps (stock-sctr → stock-screen
 | `stock-sctr` | stocks | Stock SCTR by cap bucket (large/mid/small) |
 | `stock-screener` | stocks | Ranked stocks within STRONG BUY / BUY industries |
 | `closing-range` | stocks | IBD correction leader filter (F1–F5 criteria) |
+| `down-day-rs` | stocks | Down-day relative strength: down-capture / down-day win-rate / up-down spread vs SPY, ranked 0–99 |
 
 ```bash
 # Backtest as of a historical date
@@ -222,6 +223,7 @@ All outputs are written to `results/` with a date suffix:
 | `breadth_sector_DATE.csv` | Same metrics broken down by GICS sector |
 | `signal_delta_DATE.csv` | What changed vs previous run |
 | `closing_range_DATE.csv` | IBD correction leaders with F1–F5 pass/fail |
+| `down_day_rs_DATE.csv` + `.md` | Down-day relative strength: per-window down-capture, down-day win-rate, up/down spread, `down_day_rank` (0–99, also within cap bucket + industry) |
 | `market_clock_DATE.csv` | Regime state for SPY, QQQ, IWM |
 | `rs_percentile_DATE.csv` | RS composite percentile ranks |
 | `ath_monitor_DATE.csv` | ATH proximity and signal per industry |
@@ -234,6 +236,7 @@ All outputs are written to `results/` with a date suffix:
 - **SCTR** — StockCharts Technical Rank. Weighted blend of 6 technical indicators across 3 timeframes (short, medium, long).
 - **RS Composite Percentile** — Proprietary formula weighting 12-month RS most heavily: `(Q4×2 + Q3×1 + Q2×1 + Q1×1) / 5`, converted to 1–99 percentile.
 - **Market Clock** — Tracks Follow-Through Days (FTD) and distribution day counts per index to identify regime transitions.
+- **Down-Day Relative Strength** — Conditions on the benchmark's *daily* direction (not a whole-window aggregate like the closing-range filter). `down_capture` = mean stock return on SPY-down days ÷ mean SPY return on those days (< 1 cushioned, ≤ 0 rose while the market fell); `capture_spread` = up-capture − down-capture is the O'Neil "full rallies, holds on selloffs" profile. CLI (`down-day-rs`, OHLC + closing-range-window) and the **🛡️ Down-Day RS** dashboard tab (close-to-close vs ^GSPC) share one metric + rank definition in `src/down_day_rs.py`.
 - **Synthetic Industry Index** — Market-cap-weighted daily price index built from constituent stocks to apply technical analysis to GICS industry groups.
 
 ---
