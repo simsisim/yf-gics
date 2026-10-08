@@ -1826,9 +1826,13 @@ def show_sector_drilldown(
 
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
+# Uses st.radio (bound to st.session_state) instead of st.tabs(): st.tabs() only
+# remembers the active tab as browser-side UI state, which Streamlit's frontend
+# can lose on a rerun triggered by a widget inside the tab (e.g. selecting a
+# table row) — the active tab would intermittently snap back to the first one.
+# session_state is real server-side app state, so it survives every rerun.
 
-(tab_keyidx, tab_sector, tab_ranks, tab_sctr, tab_theme, tab_heatmap, tab_rotation,
- tab_leaders, tab_downday) = st.tabs([
+_TAB_LABELS = [
     "📈 Key Index Ranks",
     "🌐 Sector Ranks",
     "🏆 Industry Ranks",
@@ -1838,12 +1842,33 @@ def show_sector_drilldown(
     "🔄 Rotation Radar",
     "🔍 Industry Leaders",
     "🛡️ Down-Day RS",
-])
+]
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = _TAB_LABELS[0]
+
+st.markdown("""
+    <style>
+    div[data-testid="stRadio"] > div[role="radiogroup"] {
+        gap: 0.4rem;
+        flex-wrap: wrap;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.3);
+        padding-bottom: 0.5rem;
+    }
+    div[data-testid="stRadio"] label {
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.5rem 0.5rem 0 0;
+    }
+    </style>
+""", unsafe_allow_html=True)
+_active_tab = st.radio(
+    "Navigation", _TAB_LABELS, horizontal=True,
+    key="active_tab", label_visibility="collapsed",
+)
 
 
 # ── Visual Tracker ────────────────────────────────────────────────────────────
 
-with tab_theme:
+if _active_tab == "📊 Visual Tracker":
     df_today = load_industry(selected_date)
     if sectors_sel:
         df_today = df_today[df_today["sector"].isin(sectors_sel)]
@@ -1955,7 +1980,7 @@ with tab_theme:
 
 # ── Tab 2 · Industry Ranks ────────────────────────────────────────────────────
 
-with tab_ranks:
+if _active_tab == "🏆 Industry Ranks":
     c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
         rank_by_label = st.selectbox("Rank by", list(RANK_BY_MAP.keys()), key="rk_by")
@@ -2169,7 +2194,7 @@ with tab_ranks:
 
 # ── Tab 3 · SCTR ─────────────────────────────────────────────────────────────
 
-with tab_sctr:
+if _active_tab == "⚡ SCTR":
     groups = available_sctr_groups()
     if not groups:
         st.info("No SCTR data in database yet.")
@@ -2444,7 +2469,7 @@ with tab_sctr:
 
 # ── Tab 4 · Leaders Heatmap ───────────────────────────────────────────────────
 
-with tab_heatmap:
+if _active_tab == "🔥 Leaders Heatmap":
     _GROUP_MAP = {
         "Large Cap":           ("large",),
         "Mid Cap":             ("mid",),
@@ -2574,7 +2599,7 @@ with tab_heatmap:
 
 # ── Tab 5 · Rotation Radar ────────────────────────────────────────────────────
 
-with tab_rotation:
+if _active_tab == "🔄 Rotation Radar":
     st.caption(
         "Which industries have the widest breadth of stocks improving/deteriorating in SCTR "
         "over a trailing window — a lead indicator ahead of the cap-weighted aggregate moving."
@@ -2675,7 +2700,7 @@ with tab_rotation:
 
 # ── Tab 1 · Sector Ranks ──────────────────────────────────────────────────────
 
-with tab_sector:
+if _active_tab == "🌐 Sector Ranks":
     dates_sec = available_dates_sector()
     if not dates_sec:
         st.info("No sector data in database yet. Run `python main.py` to download.")
@@ -2890,7 +2915,7 @@ with tab_sector:
 # drilldown/benchmark controls. Price % columns are computed in load_all_key_index
 # from each symbol's close series.
 
-with tab_keyidx:
+if _active_tab == "📈 Key Index Ranks":
     dates_ki = available_dates_key_index()
     if not dates_ki:
         st.info("No key-index data yet — the `key_indices` table (snapshot_date, symbol, close) "
@@ -3026,7 +3051,7 @@ with tab_keyidx:
 
 # ── Tab 7 · Industry Leaders ──────────────────────────────────────────────────
 
-with tab_leaders:
+if _active_tab == "🔍 Industry Leaders":
     st.caption(
         "Industries ranked by how far their best individual stock's SCTR is running "
         "ahead of the industry's own aggregate score — surfaces a mid/small-cap leader "
@@ -3093,7 +3118,7 @@ with tab_leaders:
 
 # ── Tab 8 · Down-Day RS ───────────────────────────────────────────────────────
 
-with tab_downday:
+if _active_tab == "🛡️ Down-Day RS":
     st.caption(
         "Which stocks show relative strength **specifically on the days the S&P falls** — "
         "close-to-close down-capture vs ^GSPC over the trailing window. "
