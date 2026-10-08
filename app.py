@@ -7,6 +7,7 @@ import glob
 import json
 import re
 import sqlite3
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -424,24 +425,94 @@ def load_benchmark_series(symbol: str) -> pd.DataFrame:
         )
 
 
+# ── key indices (Key Index Ranks tab) ─────────────────────────────────────────
+
+_KEYIDX_UNIVERSE_FILE = Path(__file__).parent / "input" / "key_indices.csv"
+_KEYIDX_LOOKBACK = {"pct_1d": 1, "pct_1w": 7, "pct_1m": 30, "pct_3m": 91, "pct_6m": 182, "pct_1y": 365}
 
 
+@st.cache_data(ttl=300)
+def _key_index_meta() -> dict[str, tuple[str, str]]:
+    """symbol → (display name, category) from input/key_indices.csv."""
+    try:
+        u = pd.read_csv(_KEYIDX_UNIVERSE_FILE, comment="#")
+        u.columns = u.columns.str.strip()
+        return {
+            str(r["symbol"]).strip(): (str(r["name"]).strip(), str(r["category"]).strip())
+            for _, r in u.iterrows()
+        }
+    except Exception:
+        return {}
 
 
+@st.cache_data(ttl=300)
+def available_dates_key_index() -> list[str]:
+    with sqlite3.connect(DB_PATH) as c:
+        try:
+            return [r[0] for r in c.execute(
+                "SELECT DISTINCT snapshot_date FROM key_indices ORDER BY snapshot_date DESC"
+            ).fetchall()]
+        except sqlite3.OperationalError:
+            return []
 
 
-# ── screener ──────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=300)
+def load_all_key_index() -> pd.DataFrame:
+    """
+    Every key-index snapshot with pct_1d…pct_ytd computed from the close series
+    (calendar-day lookback, nearest earlier trading day). Shaped to match what
+    build_compact_ranks_df / build_ranks_df / build_bump_chart expect:
+    snapshot_date, symbol, name, sector, sctr (NaN — indices have none), last,
+    pct_*.
+    """
+    import numpy as np
+
+    with sqlite3.connect(DB_PATH) as c:
+        try:
+            raw = pd.read_sql_query(
+                "SELECT snapshot_date, symbol, close FROM key_indices "
+                "ORDER BY symbol, snapshot_date", c,
+            )
+        except sqlite3.OperationalError:
+            return pd.DataFrame()
+    if raw.empty:
+        return raw
+
+    meta = _key_index_meta()
+    frames = []
+    for _sym, g in raw.groupby("symbol", sort=False):
+        g = g.reset_index(drop=True)
+        dt = pd.to_datetime(g["snapshot_date"])
+        idx = dt.to_numpy()
+        close = g["close"].to_numpy(dtype="float64")
+        out = g.copy()
+        for col, days in _KEYIDX_LOOKBACK.items():
+            targets = (dt - pd.Timedelta(days=days)).to_numpy()
+            pos = np.searchsorted(idx, targets, side="right") - 1
+            ref = np.where(pos >= 0, close[np.clip(pos, 0, None)], np.nan)
+            out[col] = (close / ref - 1.0) * 100.0
+        year_end = g.groupby(dt.dt.year)["close"].last()
+        ytd_ref = pd.Series(dt.dt.year - 1).map(year_end).to_numpy(dtype="float64")
+        out["pct_ytd"] = (close / ytd_ref - 1.0) * 100.0
+        frames.append(out)
+
+    df = pd.concat(frames, ignore_index=True)
+    df["name"] = df["symbol"].map(lambda s: meta.get(s, (s, ""))[0])
+    df["sector"] = df["symbol"].map(lambda s: meta.get(s, (s, "—"))[1] or "—")
+    df["sctr"] = float("nan")
+    df["last"] = df["close"]
+    return df
 
 
-
-
-
-
-
-
-
-
-
+KEY_RANK_BY_MAP = {
+    "1 Day%":   "pct_1d",
+    "1 Week%":  "pct_1w",
+    "1 Month%": "pct_1m",
+    "3 Month%": "pct_3m",
+    "6 Month%": "pct_6m",
+    "YTD%":     "pct_ytd",
+    "1 Year%":  "pct_1y",
+}
 
 
 @st.cache_data(ttl=300)
@@ -858,8 +929,11 @@ def build_ranks_df(
         day[col] = range(1, len(day) + 1)
         rank_frames[d] = day[["symbol", col]]
 
+    _base_cols = ["symbol", "name", "sector", "sctr", "last", "pct_1m", "pct_3m", "pct_ytd", "child_count"]
+    if rank_by not in _base_cols:
+        _base_cols.append(rank_by)          # e.g. pct_1w / pct_1y — needed for the sort below
     base = all_df[all_df["snapshot_date"] == today][
-        ["symbol", "name", "sector", "sctr", "last", "pct_1m", "pct_3m", "pct_ytd", "child_count"]
+        [c for c in _base_cols if c in all_df.columns]
     ].copy()
     base = base.sort_values(rank_by, ascending=False, na_position="last").reset_index(drop=True)
 
@@ -895,12 +969,14 @@ def build_ranks_df(
             )
 
     base.insert(0, "Rank", range(1, len(base) + 1))
-    base["name"] = [_name_with_count(n, c) for n, c in zip(base["name"], base["child_count"])]
+    if "child_count" in base.columns:
+        base["name"] = [_name_with_count(n, c) for n, c in zip(base["name"], base["child_count"])]
+        base = base.drop(columns=["child_count"])
     base = base.rename(columns={
         "name": "Name", "sector": "Sector",
-        "sctr": "SCTR", "pct_1m": "1M%",
+        "sctr": "SCTR", "last": "Last", "pct_1m": "1M%",
         "pct_3m": "3M%", "pct_ytd": "YTD%",
-    }).drop(columns=["symbol", "last", "child_count"])
+    }).drop(columns=["symbol"])
 
     return base
 
@@ -946,12 +1022,16 @@ def build_compact_ranks_df(
 
     _pct_src = ["pct_1d", "pct_1w", "pct_1m", "pct_3m", "pct_6m", "pct_1y", "pct_ytd"]
     _avail   = [c for c in _pct_src if c in all_df.columns]
+    _has_cc = "child_count" in all_df.columns
+    _has_last = "last" in all_df.columns
     base = all_df[all_df["snapshot_date"] == today][
-        ["symbol", "name", "sector", "sctr", "child_count"] + _avail
+        ["symbol", "name", "sector", "sctr"] + (["last"] if _has_last else [])
+        + (["child_count"] if _has_cc else []) + _avail
     ].copy()
     base = base.sort_values(rank_by, ascending=False, na_position="last").reset_index(drop=True)
-    base["name"] = [_name_with_count(n, c) for n, c in zip(base["name"], base["child_count"])]
-    base = base.drop(columns=["child_count"])
+    if _has_cc:
+        base["name"] = [_name_with_count(n, c) for n, c in zip(base["name"], base["child_count"])]
+        base = base.drop(columns=["child_count"])
     base["Rank"] = base["symbol"].map(today_ranks)
 
     def _delta_str(old_rank, new_rank):
@@ -1013,16 +1093,17 @@ def build_compact_ranks_df(
             )
 
     _rename = {
-        "name": "Name", "sector": "Sector", "sctr": "SCTR",
+        "name": "Name", "sector": "Sector", "sctr": "SCTR", "last": "Last",
         "pct_1d": "1D%", "pct_1w": "1W%", "pct_1m": "1M%",
         "pct_3m": "3M%", "pct_6m": "6M%", "pct_1y": "1Y%", "pct_ytd": "YTD%",
     }
     base = base.rename(columns=_rename).drop(columns=["symbol"])
 
     delta_cols = [c for c in base.columns if c.startswith("Δ")]
-    # return all metric columns; caller filters to user selection
+    # "Last" is a fixed column (always shown), not part of the user-selectable metrics
+    fixed_cols = ["Rank", "Name", "Sector"] + (["Last"] if _has_last else [])
     metric_cols = ["SCTR"] + [_rename[c] for c in _avail]
-    ordered = ["Rank", "Name", "Sector"] + metric_cols + delta_cols
+    ordered = fixed_cols + metric_cols + delta_cols
     return base[[c for c in ordered if c in base.columns]]
 
 
@@ -1691,6 +1772,7 @@ def show_sector_drilldown(
         "Rank": st.column_config.NumberColumn("Rank", format="%d"),
         "Name": st.column_config.TextColumn("Industry"),
         "SCTR": st.column_config.NumberColumn("SCTR", format="%.1f"),
+        "Last": st.column_config.NumberColumn("Last", format="%.2f"),
         **{c: st.column_config.NumberColumn(c, format=_pct_fmt)
            for c in ["1D%", "1W%", "1M%", "3M%", "6M%", "1Y%", "YTD%"]},
     }
@@ -1745,8 +1827,9 @@ def show_sector_drilldown(
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
 
-(tab_sector, tab_ranks, tab_sctr, tab_theme, tab_heatmap, tab_rotation,
+(tab_keyidx, tab_sector, tab_ranks, tab_sctr, tab_theme, tab_heatmap, tab_rotation,
  tab_leaders, tab_downday) = st.tabs([
+    "📈 Key Index Ranks",
     "🌐 Sector Ranks",
     "🏆 Industry Ranks",
     "⚡ SCTR",
@@ -1949,7 +2032,7 @@ with tab_ranks:
                                                 bench_ser=_rk_bench_ser)
 
             _all_metrics = [c for c in compact_df.columns
-                            if c not in ("Rank", "Name", "Sector") and not c.startswith("Δ")]
+                            if c not in ("Rank", "Name", "Sector", "Last") and not c.startswith("Δ")]
             _delta_cols  = [c for c in compact_df.columns if c.startswith("Δ")]
             _defaults    = [c for c in ["SCTR", "1D%", "1W%", "1M%", "YTD%"] if c in _all_metrics]
 
@@ -1962,7 +2045,7 @@ with tab_ranks:
             if not selected_metrics:
                 selected_metrics = _defaults
 
-            show_cols = ["Rank", "Name", "Sector"] + selected_metrics + _delta_cols
+            show_cols = ["Rank", "Name", "Sector", "Last"] + selected_metrics + _delta_cols
             display_df = compact_df[[c for c in show_cols if c in compact_df.columns]]
 
             rk_search = st.text_input(
@@ -1973,6 +2056,7 @@ with tab_ranks:
 
             _pct_fmt = "%.2f%%"
             col_cfg = {
+                "Last": st.column_config.NumberColumn("Last", format="%.2f"),
                 "SCTR": st.column_config.NumberColumn("SCTR", format="%.1f"),
                 "1D%":  st.column_config.NumberColumn("1D%",  format=_pct_fmt),
                 "1W%":  st.column_config.NumberColumn("1W%",  format=_pct_fmt),
@@ -2051,6 +2135,7 @@ with tab_ranks:
                 date_cols = [_fmt_date(d) for d in [rk_as_of, resolved]]
                 col_cfg_r = {
                     "SCTR":   st.column_config.NumberColumn("SCTR", format="%.1f"),
+                    "Last":   st.column_config.NumberColumn("Last", format="%.2f"),
                     "1M%":    st.column_config.NumberColumn("1M%",  format="%.2f%%"),
                     "3M%":    st.column_config.NumberColumn("3M%",  format="%.2f%%"),
                     "YTD%":   st.column_config.NumberColumn("YTD%", format="%.2f%%"),
@@ -2670,7 +2755,7 @@ with tab_sector:
                 sr_compact = sr_compact.drop(columns=["Sector"], errors="ignore")
 
                 _sr_metrics = [c for c in sr_compact.columns
-                               if c not in ("Rank", "Name") and not c.startswith("Δ")]
+                               if c not in ("Rank", "Name", "Last") and not c.startswith("Δ")]
                 _sr_deltas  = [c for c in sr_compact.columns if c.startswith("Δ")]
                 _sr_def     = [c for c in ["SCTR", "1D%", "1W%", "1M%", "YTD%"] if c in _sr_metrics]
 
@@ -2681,13 +2766,14 @@ with tab_sector:
                     sr_sel_metrics = _sr_def
 
                 sr_show = sr_compact[
-                    ["Rank", "Name"] +
+                    ["Rank", "Name", "Last"] +
                     [c for c in sr_sel_metrics if c in sr_compact.columns] +
                     _sr_deltas
                 ]
 
                 _sr_pct_fmt = "%.2f%%"
                 sr_col_cfg = {
+                    "Last": st.column_config.NumberColumn("Last", format="%.2f"),
                     "SCTR": st.column_config.NumberColumn("SCTR", format="%.1f"),
                     **{c: st.column_config.NumberColumn(c, format=_sr_pct_fmt)
                        for c in ["1D%", "1W%", "1M%", "3M%", "6M%", "1Y%", "YTD%"]},
@@ -2760,6 +2846,7 @@ with tab_sector:
                     sr_date_cols = [_fmt_date(d) for d in [sr_as_of, sr_resolved]]
                     sr_cmp_cfg = {
                         "SCTR":   st.column_config.NumberColumn("SCTR", format="%.1f"),
+                        "Last":   st.column_config.NumberColumn("Last", format="%.2f"),
                         "1M%":    st.column_config.NumberColumn("1M%",  format="%.2f%%"),
                         "3M%":    st.column_config.NumberColumn("3M%",  format="%.2f%%"),
                         "YTD%":   st.column_config.NumberColumn("YTD%", format="%.2f%%"),
@@ -2796,6 +2883,145 @@ with tab_sector:
                             sr_compare_opts, _sr_bench_ser,
                             compare_date=sr_resolved,
                         )
+
+
+# ── Tab 1b · Key Index Ranks ─────────────────────────────────────────────────
+# Same machinery as Sector Ranks, minus SCTR (indices have none) and minus the
+# drilldown/benchmark controls. Price % columns are computed in load_all_key_index
+# from each symbol's close series.
+
+with tab_keyidx:
+    dates_ki = available_dates_key_index()
+    if not dates_ki:
+        st.info("No key-index data yet — the `key_indices` table (snapshot_date, symbol, close) "
+                "is not populated in `data/yf_dashboard.db`.")
+    else:
+        all_ki = load_all_key_index()
+
+        kc1, kc2 = st.columns([2, 2])
+        with kc1:
+            ki_rank_by_label = st.selectbox("Rank by", list(KEY_RANK_BY_MAP.keys()),
+                                            index=2, key="ki_by")
+        with kc2:
+            ki_as_of = st.selectbox("As of", dates_ki, key="ki_as_of")
+
+        ki_rank_by = KEY_RANK_BY_MAP[ki_rank_by_label]
+        ki_compare_opts = [d for d in dates_ki if d < ki_as_of]
+
+        kvc1, kvc2, kvc3, kvc4 = st.columns([2, 2, 2, 2])
+        with kvc1:
+            ki_view = st.radio("View", ["Rolling window", "Compare with date"],
+                               horizontal=True, key="ki_view")
+
+        # ── Rolling window ───────────────────────────────────────────────────
+        if ki_view == "Rolling window":
+            with kvc2:
+                ki_window = st.selectbox("Last N snapshots", [10, 20, 40, 60, "All"], key="ki_window")
+            with kvc3:
+                ki_chart_mode = st.selectbox("Chart shows", ["Top N", "Bottom N", "Top/Bottom N"],
+                                             key="ki_chart_mode")
+            with kvc4:
+                ki_top_n = st.number_input("N per side", min_value=1, max_value=20, value=8, key="ki_top_n")
+
+            ki_window_dates = (ki_compare_opts if ki_window == "All"
+                               else ki_compare_opts[:int(ki_window) - 1])
+
+            _kn = int(ki_top_n)
+            if ki_chart_mode == "Top N":
+                _kc_top, _kc_bot = _kn, 0
+            elif ki_chart_mode == "Bottom N":
+                _kc_top, _kc_bot = 0, _kn
+            else:
+                _kc_top, _kc_bot = _kn, _kn
+
+            if not ki_window_dates:
+                st.info("Only one snapshot available — need at least two to compare.")
+            else:
+                with st.expander("Bump chart", expanded=False):
+                    st.plotly_chart(
+                        build_bump_chart(all_ki, ki_rank_by, ki_as_of, ki_window_dates,
+                                         top_n=_kc_top, bottom_n=_kc_bot),
+                        use_container_width=True,
+                    )
+
+                ki_compact = build_compact_ranks_df(all_ki, ki_rank_by, ki_as_of, ki_window_dates)
+                ki_compact = ki_compact.drop(columns=["SCTR"], errors="ignore")
+
+                _ki_metrics = [c for c in ki_compact.columns
+                               if c not in ("Rank", "Name", "Sector", "Last") and not c.startswith("Δ")]
+                _ki_deltas = [c for c in ki_compact.columns if c.startswith("Δ")]
+                _ki_def = [c for c in ["1D%", "1W%", "1M%", "3M%", "YTD%"] if c in _ki_metrics]
+
+                ki_sel_metrics = st.multiselect("Columns to show", options=_ki_metrics,
+                                                default=_ki_def, key="ki_cols")
+                if not ki_sel_metrics:
+                    ki_sel_metrics = _ki_def
+
+                ki_show = ki_compact[
+                    ["Rank", "Name", "Sector", "Last"]
+                    + [c for c in ki_sel_metrics if c in ki_compact.columns]
+                    + _ki_deltas
+                ]
+                ki_col_cfg = {
+                    "Last": st.column_config.NumberColumn("Last", format="%.2f"),
+                    **{c: st.column_config.NumberColumn(c, format="%.2f%%")
+                       for c in ["1D%", "1W%", "1M%", "3M%", "6M%", "1Y%", "YTD%"]},
+                }
+                ki_col_cfg.update({c: st.column_config.TextColumn(c) for c in _ki_deltas})
+
+                st.caption("Price % change over each window · Δ = rank change. No SCTR for indices.")
+                st.dataframe(
+                    ki_show.reset_index(drop=True),
+                    use_container_width=True, height=560, column_config=ki_col_cfg,
+                )
+
+        # ── Compare with date ────────────────────────────────────────────────
+        else:
+            import datetime as _dt
+
+            _ki_min = _dt.date.fromisoformat(ki_compare_opts[-1]) if ki_compare_opts else None
+            _ki_max = _dt.date.fromisoformat(ki_as_of) - _dt.timedelta(days=1)
+
+            if _ki_min is None:
+                st.info("No historical snapshots available to compare with.")
+            else:
+                with kvc2:
+                    ki_picked = st.date_input("Compare with", value=_ki_max,
+                                              min_value=_ki_min, max_value=_ki_max,
+                                              key="ki_compare_date",
+                                              help="Weekends/holidays snap to the nearest earlier trading day.")
+                ki_resolved = _nearest_earlier_date(ki_picked, ki_compare_opts)
+
+                if ki_resolved is None:
+                    st.warning(f"No snapshots before **{ki_picked.strftime('%b %-d')}**. "
+                               f"Earliest available: **{_fmt_date(ki_compare_opts[-1])}**.")
+                else:
+                    if ki_resolved != ki_picked.isoformat():
+                        st.info(f"No snapshot for **{ki_picked.strftime('%b %-d')}** — "
+                                f"using **{_fmt_date(ki_resolved)}** instead.")
+
+                    ki_ranks = build_ranks_df(all_ki, ki_rank_by, ki_as_of, [ki_resolved])
+                    ki_ranks = ki_ranks.drop(columns=["SCTR"], errors="ignore")
+
+                    _ki_rlbl = _fmt_date(ki_resolved)
+                    _ki_vs_price = f"Δ Price% {_ki_rlbl}"
+                    ki_cmp_cfg = {
+                        c: st.column_config.NumberColumn(c, format="%.2f%%")
+                        for c in ["1M%", "3M%", "YTD%"]
+                    }
+                    ki_cmp_cfg["Last"] = st.column_config.NumberColumn("Last", format="%.2f")
+                    ki_cmp_cfg["Δ Rank"] = st.column_config.NumberColumn(
+                        f"Δ Rank (vs {_ki_rlbl})", format="%+d")
+                    ki_cmp_cfg[_ki_vs_price] = st.column_config.NumberColumn(
+                        _ki_vs_price, format="%+.2f%%")
+                    for dc in (_fmt_date(ki_as_of), _fmt_date(ki_resolved)):
+                        ki_cmp_cfg[dc] = st.column_config.NumberColumn(dc, format="%d")
+
+                    st.caption(f"Δ Rank / Δ Price% vs {_ki_rlbl}.")
+                    st.dataframe(
+                        ki_ranks.reset_index(drop=True),
+                        use_container_width=True, height=560, column_config=ki_cmp_cfg,
+                    )
 
 
 # ── Tab 7 · Industry Leaders ──────────────────────────────────────────────────

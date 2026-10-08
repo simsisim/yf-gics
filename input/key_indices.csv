@@ -1,0 +1,27 @@
+# Key Index Ranks universe — macro indices + size/style/bond ETFs.
+# Ranked like Sector Ranks but with no SCTR (indices have no SCTR).
+# Price history is stitched from downloadData_v1 when present, else pulled
+# from yfinance.  category = the grouping shown in the "Sector" column.
+#
+# symbol, name, category
+symbol,name,category
+^GSPC,S&P 500,Equity · Broad
+^DJI,Dow Jones Industrial Average,Equity · Broad
+^NDX,Nasdaq 100,Equity · Broad
+^RUT,Russell 2000,Equity · Broad
+^DJT,Dow Jones Transportation Average,Equity · Sector
+^DJU,Dow Jones Utility Average,Equity · Sector
+^VIX,CBOE Volatility Index,Volatility
+SPY,S&P 500 (SPDR),Equity · Size
+QQQ,Nasdaq 100 (Invesco),Equity · Size
+IWM,Russell 2000 (iShares),Equity · Size
+MDYG,S&P 400 MidCap Growth,Equity · Size
+MDYV,S&P 400 MidCap Value,Equity · Size
+SPSM,S&P SmallCap 600 (SPDR),Equity · Size
+FFTY,Innovator IBD 50,Equity · Growth
+IWF,Russell 1000 Growth,Equity · Style
+IWD,Russell 1000 Value,Equity · Style
+TLT,20+ Year Treasuries,Bond · Govt
+IEF,7-10 Year Treasuries,Bond · Govt
+LQD,Investment Grade Corp,Bond · Credit
+HYG,High Yield Corp,Bond · Credit
